@@ -1,0 +1,4147 @@
+
+
+========== package.json ==========
+
+{"name":"erp-software","version":"0.1.0","private":true,"scripts":{"dev":"next dev","build":"next build","start":"next start","lint":"eslint","seed":"node --env-file=.env.local scripts/seed.js"},"dependencies":{"@react-pdf/renderer":"^4.9.0","bcryptjs":"^3.0.3","jose":"^6.2.12","jsbarcode":"^3.12.3","jspdf":"^4.2.1","jspdf-autotable":"^5.0.8","lucide-react":"^1.52.0","next":"16.3.8","pg":"^8.23.1","react":"19.2.8","react-dom":"19.2.8","recharts":"^3.10.1","xlsx":"^0.18.5"},"devDependencies":{"@tailwindcss/postcss":"^4","eslint":"^9","eslint-config-next":"16.3.8","tailwindcss":"^4"}}
+
+
+========== middleware.js ==========
+
+import { NextResponse } from "next/server";
+import { jwtVerify } from "jose";
+
+const secret = new TextEncoder().encode(
+  process.env.JWT_SECRET
+);
+
+export async function middleware(request) {
+  const token =
+    request.cookies.get(
+      "erp_token"
+    )?.value;
+
+  if (!token) {
+    return NextResponse.redirect(
+      new URL(
+        "/login",
+        request.url
+      )
+    );
+  }
+
+  try {
+    await jwtVerify(
+      token,
+      secret
+    );
+
+    return NextResponse.next();
+  } catch {
+    return NextResponse.redirect(
+      new URL(
+        "/login",
+        request.url
+      )
+    );
+  }
+}
+
+export const config = {
+  matcher: [
+    "/dashboard/:path*",
+  ],
+};
+
+
+========== lib\auth.js ==========
+
+import { SignJWT, jwtVerify } from "jose";
+import { cookies } from "next/headers";
+
+const secretValue = process.env.JWT_SECRET;
+
+if (!secretValue) {
+    throw new Error("JWT_SECRET is not configured.");
+}
+
+const secret = new TextEncoder().encode(secretValue);
+
+export async function createToken(user) {
+    return await new SignJWT({
+        userId: user.user_id,
+        username: user.username,
+        roleId: user.role_id,
+        roleName: user.role_name,
+        companyId: user.company_id,
+    })
+        .setProtectedHeader({ alg: "HS256" })
+        .setIssuedAt()
+        .setExpirationTime("1d")
+        .sign(secret);
+}
+
+export async function verifyToken(token) {
+    try {
+        const { payload } = await jwtVerify(token, secret);
+        return payload;
+    } catch {
+        return null;
+    }
+}
+
+export async function getCurrentUser() {
+    const cookieStore = await cookies();
+    const token = cookieStore.get("erp_token")?.value;
+
+    if (!token) {
+        return null;
+    }
+
+    return await verifyToken(token);
+}
+
+
+
+========== lib\db.js ==========
+
+import pg from "pg";
+
+const { Pool } = pg;
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+
+pool.on("error", (err) => {
+  console.error("Unexpected PostgreSQL error:", err);
+});
+
+export default pool;
+
+
+========== lib\permissions.js ==========
+
+import pool from "@/lib/db";
+
+export async function hasPermission(
+  roleId,
+  permissionKey,
+  action = "view"
+) {
+  const result = await pool.query(
+    `
+    SELECT
+      CASE
+        WHEN $2 = 'view' THEN rp.can_view
+        WHEN $2 = 'create' THEN rp.can_create
+        WHEN $2 = 'update' THEN rp.can_update
+        WHEN $2 = 'delete' THEN rp.can_delete
+        ELSE FALSE
+      END AS allowed
+
+    FROM role_permissions rp
+
+    INNER JOIN permissions p
+      ON p.permission_id = rp.permission_id
+
+    WHERE rp.role_id = $1
+      AND p.permission_key = $3
+    `,
+    [
+      roleId,
+      action,
+      permissionKey,
+    ]
+  );
+
+  return result.rows[0]?.allowed === true;
+}
+
+
+export async function requirePermission(
+  user,
+  permissionKey,
+  action = "view"
+) {
+  if (!user) {
+    throw new Error("UNAUTHORIZED");
+  }
+
+  const allowed = await hasPermission(
+    user.roleId,
+    permissionKey,
+    action
+  );
+
+  if (!allowed) {
+    throw new Error("FORBIDDEN");
+  }
+
+  return true;
+}
+
+
+========== app\login\page.js ==========
+
+
+"use client";
+
+import { Suspense, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+
+function LoginForm() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const initialCompanyId = searchParams.get("companyId") || "";
+  const initialCompanyName =
+    searchParams.get("companyName") || "Administrator Login";
+
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [selectedCompanyId, setSelectedCompanyId] =
+    useState(initialCompanyId);
+  const [companies, setCompanies] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleLogin(event) {
+    event.preventDefault();
+    setError("");
+
+    if (!username.trim() || !password) {
+      setError("Please enter your username and password.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: username.trim(),
+          password,
+          companyId: selectedCompanyId || undefined,
+        }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (response.status === 409 && data.companies) {
+        setCompanies(data.companies);
+        setSelectedCompanyId("");
+        setError("Your account has access to multiple companies. Select one to continue.");
+        return;
+      }
+
+      if (!response.ok) {
+        setError(data.message || "Login failed. Please check your credentials.");
+        return;
+      }
+
+      const companyId = String(data.user.companyId);
+      const companyName = data.user.companyName;
+
+      localStorage.setItem(
+        "erp-selected-company",
+        JSON.stringify({ companyId, companyName })
+      );
+      router.replace("/dashboard");
+
+      router.replace("/dashboard");
+      router.refresh();
+    } catch (err) {
+      console.error("Login failed:", err);
+      setError("Unable to connect to the server. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-slate-100 px-4 py-8">
+      <div className="w-full max-w-md rounded-2xl bg-white p-8 shadow-xl">
+        <div className="mb-8 text-center">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-900 text-2xl font-bold text-white">
+            {initialCompanyName.charAt(0).toUpperCase()}
+          </div>
+
+          <h1 className="break-words text-3xl font-bold text-slate-900">
+            {initialCompanyName}
+          </h1>
+
+          <p className="mt-2 text-slate-500">
+            Sign in to your company account
+          </p>
+        </div>
+
+        {error && (
+          <div
+            role="alert"
+            className="mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+          >
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleLogin} className="space-y-5">
+          <div>
+            <label htmlFor="username" className="mb-2 block text-sm font-medium text-slate-700">
+              Username
+            </label>
+            <input
+              id="username"
+              type="text"
+              autoComplete="username"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder="Enter username"
+              className="w-full rounded-lg border border-slate-300 px-4 py-3 outline-none focus:border-slate-600 focus:ring-2 focus:ring-slate-200"
+              required
+            />
+          </div>
+
+          <div>
+            <label htmlFor="password" className="mb-2 block text-sm font-medium text-slate-700">
+              Password
+            </label>
+            <input
+              id="password"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="Enter password"
+              className="w-full rounded-lg border border-slate-300 px-4 py-3 outline-none focus:border-slate-600 focus:ring-2 focus:ring-slate-200"
+              required
+            />
+          </div>
+
+          {companies.length > 0 && (
+            <div>
+              <label htmlFor="company" className="mb-2 block text-sm font-medium text-slate-700">
+                Select Company
+              </label>
+              <select
+                id="company"
+                value={selectedCompanyId}
+                onChange={(event) => setSelectedCompanyId(event.target.value)}
+                required
+                className="w-full rounded-lg border border-slate-300 bg-white px-4 py-3 outline-none focus:border-slate-600"
+              >
+                <option value="">Choose a company</option>
+                {companies.map((company) => (
+                  <option
+                    key={company.company_id}
+                    value={String(company.company_id)}
+                  >
+                    {company.company_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full rounded-lg bg-slate-900 py-3 font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {loading ? "Signing in..." : "Sign In"}
+          </button>
+        </form>
+
+        <div className="mt-6 text-center text-sm text-slate-500">
+          Secure Company Login
+        </div>
+
+        <div className="mt-4 text-center">
+          <button
+            type="button"
+            onClick={() => router.push("/companies/register-company")}
+            className="text-sm font-medium text-blue-700 hover:underline"
+          >
+            Company registration and selection
+          </button>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="flex min-h-screen items-center justify-center bg-slate-100">
+          <p className="text-slate-600">Loading login...</p>
+        </main>
+      }
+    >
+      <LoginForm />
+    </Suspense>
+  );
+}
+
+
+
+========== app\dashboard\layout.js ==========
+
+
+import { cookies } from "next/headers";
+import DashboardLayoutClient from "./DashboardLayoutClient";
+
+export default async function DashboardLayout({ children }) {
+  const cookieStore = await cookies();
+  const cookieMode = cookieStore.get("erp-sidebar-mode")?.value;
+
+  const initialMode =
+    cookieMode === "horizontal" ? "horizontal" : "vertical";
+
+  return (
+    <DashboardLayoutClient initialMode={initialMode}>
+      {children}
+    </DashboardLayoutClient>
+  );
+}
+
+
+
+========== app\dashboard\DashboardLayoutClient.js ==========
+
+
+"use client";
+
+import { useState } from "react";
+import Sidebar from "@/components/Sidebar";
+import Header from "@/components/Header";
+
+export default function DashboardLayoutClient({
+  children,
+  initialMode = "vertical",
+}) {
+  const [mode, setMode] = useState(initialMode);
+
+  const isHorizontal = mode === "horizontal";
+
+  return (
+    <div className="erp-page-gradient min-h-dvh">
+      <div
+        className={
+          isHorizontal
+            ? "flex min-h-dvh flex-col"
+            : "flex min-h-dvh flex-col md:flex-row"
+        }
+      >
+        <Sidebar mode={mode} onModeChange={setMode} />
+
+        <div
+          className={
+            isHorizontal
+              ? "flex min-h-0 min-w-0 flex-1 flex-col"
+              : "flex min-h-dvh min-w-0 flex-1 flex-col md:min-h-0"
+          }
+        >
+          <Header />
+
+          <main className="min-w-0 flex-1 px-4 py-6 sm:px-6 sm:py-8 xl:px-9">
+            <div className="mx-auto w-full max-w-[1800px]">
+              {children}
+            </div>
+          </main>
+
+          <footer className="shrink-0 border-t border-slate-200/70 px-6 py-4 text-center text-xs text-slate-500">
+            ERP Workspace · Business Management System
+          </footer>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+
+========== app\dashboard\page.js ==========
+
+import { getCurrentUser } from "@/lib/auth";
+import DashboardAnalytics from "./DashboardAnalytics";
+import {
+  UserRound,
+  ShieldCheck,
+  LayoutDashboard,
+  ArrowUpRight,
+} from "lucide-react";
+
+function InfoCard({ title, value, description, icon: Icon, accent }) {
+  const iconColors = {
+    blue: "bg-sky-100 text-sky-700 ring-sky-200",
+    green: "bg-emerald-100 text-emerald-700 ring-emerald-200",
+    teal: "bg-teal-100 text-teal-700 ring-teal-200",
+  };
+
+  return (
+    <div className="group rounded-2xl border border-sky-100 bg-white p-5 shadow-sm transition duration-200 hover:-translate-y-1 hover:border-sky-200 hover:shadow-lg sm:p-6">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-slate-500">
+            {title}
+          </p>
+
+          <h2 className="mt-3 break-words text-2xl font-bold tracking-tight text-slate-800">
+            {value}
+          </h2>
+
+          <p className="mt-2 text-xs leading-5 text-slate-500">
+            {description}
+          </p>
+        </div>
+
+        <div
+          className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl ring-1 ${iconColors[accent]}`}
+        >
+          <Icon size={23} strokeWidth={1.8} />
+        </div>
+      </div>
+
+      <div className="mt-5 flex items-center gap-1 border-t border-slate-100 pt-4 text-xs font-semibold text-sky-700">
+        <span>ERP workspace</span>
+        <ArrowUpRight
+          size={14}
+          className="transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5"
+        />
+      </div>
+    </div>
+  );
+}
+
+export default async function DashboardPage() {
+  const user = await getCurrentUser();
+
+  return (
+    <div className="space-y-8">
+      {/* Welcome header */}
+      <section className="relative overflow-hidden rounded-3xl border border-sky-100 bg-gradient-to-r from-sky-50 via-white to-emerald-50 p-6 shadow-sm sm:p-8">
+        <div className="pointer-events-none absolute -right-12 -top-16 h-48 w-48 rounded-full bg-sky-200/30 blur-3xl" />
+        <div className="pointer-events-none absolute -bottom-16 right-32 h-40 w-40 rounded-full bg-emerald-200/30 blur-3xl" />
+
+        <div className="relative flex flex-col justify-between gap-5 sm:flex-row sm:items-center">
+          <div>
+            <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-white/80 px-3 py-1.5 text-xs font-semibold text-emerald-700 shadow-sm">
+              <span className="h-2 w-2 rounded-full bg-emerald-500" />
+              ERP workspace
+            </div>
+
+            <h1 className="text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">
+              Welcome back,{" "}
+              <span className="text-sky-700">
+                {user?.username || "User"}
+              </span>
+            </h1>
+
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-600 sm:text-base">
+              Manage your business operations, monitor performance,
+              and keep your sales, inventory, and accounting organized.
+            </p>
+          </div>
+
+          <div className="hidden h-20 w-20 shrink-0 items-center justify-center rounded-3xl border border-white bg-white/80 text-sky-700 shadow-sm sm:flex">
+            <LayoutDashboard size={38} strokeWidth={1.5} />
+          </div>
+        </div>
+      </section>
+
+      {/* User information cards */}
+      <section>
+        <div className="mb-4">
+          <h2 className="text-lg font-bold text-slate-800">
+            Your Workspace
+          </h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Your account and system information at a glance.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+          <InfoCard
+            title="Logged-in User"
+            value={user?.username || "User"}
+            description="Your current ERP account"
+            icon={UserRound}
+            accent="blue"
+          />
+
+          <InfoCard
+            title="Account Role"
+            value={user?.roleName || "User"}
+            description="Your assigned system role"
+            icon={ShieldCheck}
+            accent="green"
+          />
+
+          <InfoCard
+            title="System"
+            value="ERP"
+            description="Business management workspace"
+            icon={LayoutDashboard}
+            accent="teal"
+          />
+        </div>
+      </section>
+
+      {/* Business analytics */}
+      <section>
+        <DashboardAnalytics />
+      </section>
+
+      {/* System overview */}
+      <section className="overflow-hidden rounded-2xl border border-sky-100 bg-white shadow-sm">
+        <div className="h-1.5 bg-gradient-to-r from-sky-500 via-cyan-400 to-emerald-500" />
+
+        <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-center sm:p-7">
+          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-sky-50 text-sky-700 ring-1 ring-sky-100">
+            <ShieldCheck size={27} />
+          </div>
+
+          <div>
+            <h2 className="text-xl font-bold text-slate-800">
+              Your business, in one place
+            </h2>
+
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
+              Your ERP brings authentication, roles, permissions,
+              inventory, sales, purchases, and accounting into a
+              single workspace. Access to each module depends on
+              your assigned permissions.
+            </p>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+
+========== app\companies\register-company\page.js ==========
+
+
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import {
+    Building2,
+    UserRound,
+    LoaderCircle,
+    Upload,
+    MapPin,
+    X,
+    ArrowLeft,
+    Plus,
+    RefreshCw,
+    LogIn,
+    Pencil,
+} from "lucide-react";
+
+const initialForm = {
+    companyName: "",
+    phone: "",
+    companyEmail: "",
+    address: "",
+    city: "",
+    province: "",
+    country: "Pakistan",
+    postalCode: "",
+    currency: "PKR",
+    assignmentMode: "newAdmin",
+    fullName: "",
+    username: "",
+    adminEmail: "",
+    password: "",
+    confirmPassword: "",
+    existingUserId: "",
+    existingRoleId: "",
+    companyPassword: "",
+    confirmCompanyPassword: "",
+};
+
+const inputClass =
+    "w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm text-gray-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100";
+
+const labelClass = "mb-1.5 block text-sm font-medium text-gray-700";
+
+const MAX_LOGO_SIZE = 2 * 1024 * 1024;
+const allowedLogoTypes = ["image/png", "image/jpeg", "image/webp"];
+
+async function readResponse(response) {
+    const text = await response.text();
+    let data = {};
+
+    if (text) {
+        try {
+            data = JSON.parse(text);
+        } catch {
+            throw new Error(
+                `Invalid server response (HTTP ${response.status}). Check the API route.`
+            );
+        }
+    }
+
+    if (!response.ok) {
+        throw new Error(
+            data.message || `Request failed (HTTP ${response.status}).`
+        );
+    }
+
+    return data;
+}
+
+function CompanySelectionView({ onRegister }) {
+    const [companies, setCompanies] = useState([]);
+    const [loadingCompanies, setLoadingCompanies] = useState(true);
+    const [companyError, setCompanyError] = useState("");
+
+    async function loadCompanies(signal) {
+        try {
+            const response = await fetch("/api/settings/list", {
+                method: "GET",
+                cache: "no-store",
+                headers: { Accept: "application/json" },
+                signal,
+            });
+
+            const data = await readResponse(response);
+
+            if (!signal.aborted) {
+                setCompanies(
+                    Array.isArray(data.companies) ? data.companies : []
+                );
+                setCompanyError("");
+            }
+        } catch (error) {
+            if (error.name !== "AbortError" && !signal.aborted) {
+                setCompanyError(
+                    error.message || "Unable to load companies."
+                );
+            }
+        } finally {
+            if (!signal.aborted) {
+                setLoadingCompanies(false);
+            }
+        }
+    }
+
+    useEffect(() => {
+        const controller = new AbortController();
+
+        Promise.resolve().then(() => {
+            if (!controller.signal.aborted) {
+                loadCompanies(controller.signal);
+            }
+        });
+
+        return () => controller.abort();
+    }, []);
+
+    function retryLoadingCompanies() {
+        const controller = new AbortController();
+
+        setLoadingCompanies(true);
+        setCompanyError("");
+
+        loadCompanies(controller.signal);
+    }
+
+    return (
+        <main className="min-h-screen bg-gray-50 px-4 py-10">
+            <div className="mx-auto max-w-6xl">
+                <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <div className="mb-2 flex items-center gap-2 text-sm font-medium text-blue-600">
+                            <Building2 size={18} />
+                            Company Management
+                        </div>
+
+                        <h1 className="text-3xl font-bold tracking-tight text-gray-900">
+                            Your Companies
+                        </h1>
+
+                        <p className="mt-2 text-sm text-gray-600">
+                            Log in to a company or register a new company.
+                            Only authorized company administrators can edit
+                            company information.
+                        </p>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={onRegister}
+                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
+                    >
+                        <Plus size={19} />
+                        Register New Company
+                    </button>
+                </header>
+
+                {companyError && (
+                    <div
+                        role="alert"
+                        className="mb-6 flex flex-col gap-3 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                        <span>{companyError}</span>
+
+                        <button
+                            type="button"
+                            onClick={retryLoadingCompanies}
+                            className="inline-flex items-center gap-2 font-semibold"
+                        >
+                            <RefreshCw size={15} />
+                            Retry
+                        </button>
+                    </div>
+                )}
+
+                {loadingCompanies ? (
+                    <div className="flex min-h-64 items-center justify-center gap-3 text-gray-500">
+                        <LoaderCircle
+                            size={23}
+                            className="animate-spin text-blue-600"
+                        />
+                        Loading companies...
+                    </div>
+                ) : companies.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center">
+                        <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-50 text-blue-600">
+                            <Building2 size={32} />
+                        </div>
+
+                        <h2 className="text-xl font-semibold text-gray-900">
+                            No Companies Yet
+                        </h2>
+
+                        <p className="mx-auto mt-2 max-w-md text-sm text-gray-500">
+                            Register your first company to start managing its
+                            users, inventory, sales, purchases, and accounts.
+                        </p>
+
+                        <button
+                            type="button"
+                            onClick={onRegister}
+                            className="mt-6 inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-3 font-semibold text-white hover:bg-blue-700"
+                        >
+                            <Plus size={18} />
+                            Register Your First Company
+                        </button>
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+                        {companies.map((company) => (
+                            <article
+                                key={company.company_id}
+                                className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
+                            >
+                                <div className="flex h-40 items-center justify-center border-b border-gray-100 bg-gray-50 p-5">
+                                    {company.logo_url ? (
+                                        <img
+                                            src={company.logo_url}
+                                            alt={`${company.company_name} logo`}
+                                            className="h-full max-w-full object-contain"
+                                        />
+                                    ) : (
+                                        <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-blue-100 text-blue-600">
+                                            <Building2 size={42} />
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="p-5">
+                                    <h2 className="truncate text-lg font-bold text-gray-900">
+                                        {company.company_name}
+                                    </h2>
+
+                                    <div className="mt-4 space-y-2.5 text-sm text-gray-600">
+                                        {(
+                                            company.address ||
+                                            company.city ||
+                                            company.location
+                                        ) && (
+                                            <div className="flex items-start gap-2">
+                                                <MapPin
+                                                    size={16}
+                                                    className="mt-0.5 shrink-0 text-gray-400"
+                                                />
+                                                <span>
+                                                    {[
+                                                        company.address,
+                                                        company.city,
+                                                        company.location,
+                                                    ]
+                                                        .filter(Boolean)
+                                                        .filter(
+                                                            (value, index, array) =>
+                                                                array.indexOf(value) ===
+                                                                index
+                                                        )
+                                                        .join(", ")}
+                                                </span>
+                                            </div>
+                                        )}
+
+                                        {company.phone && (
+                                            <p className="break-words">
+                                                <span className="font-medium text-gray-700">
+                                                    Phone:
+                                                </span>{" "}
+                                                {company.phone}
+                                            </p>
+                                        )}
+
+                                        {company.email && (
+                                            <p className="break-all">
+                                                <span className="font-medium text-gray-700">
+                                                    Email:
+                                                </span>{" "}
+                                                {company.email}
+                                            </p>
+                                        )}
+
+                                        {company.currency && (
+                                            <p>
+                                                <span className="font-medium text-gray-700">
+                                                    Currency:
+                                                </span>{" "}
+                                                {company.currency}
+                                            </p>
+                                        )}
+                                    </div>
+
+                                    <div className="mt-5 grid grid-cols-2 gap-3">
+                                        <Link
+                                             href={`/login?companyId=${encodeURIComponent(company.company_id)}&companyName=${encodeURIComponent(company.company_name)}`}
+                                            className="flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700"
+                                        >
+                                            <LogIn size={16} />
+                                            Login
+                                        </Link>
+
+                                        <Link
+                                            href={`/companies/edit/${encodeURIComponent(
+                                                company.company_id
+                                            )}`}
+                                            className="flex items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm font-semibold text-gray-700 transition hover:bg-gray-50"
+                                        >
+                                            <Pencil size={15} />
+                                            Edit
+                                        </Link>
+                                    </div>
+                                </div>
+                            </article>
+                        ))}
+                    </div>
+                )}
+            </div>
+        </main>
+    );
+}
+
+export default function RegisterCompanyPage() {
+    const [showRegistrationForm, setShowRegistrationForm] = useState(false);
+
+    const [form, setForm] = useState(initialForm);
+    const [users, setUsers] = useState([]);
+    const [roles, setRoles] = useState([]);
+
+    const [logoFile, setLogoFile] = useState(null);
+    const [logoPreview, setLogoPreview] = useState("");
+
+    const [loadingOptions, setLoadingOptions] = useState(true);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState("");
+    const [success, setSuccess] = useState("");
+
+    useEffect(() => {
+        const controller = new AbortController();
+
+        async function fetchOptions() {
+            try {
+                const response = await fetch("/api/companies/register", {
+                    method: "GET",
+                    cache: "no-store",
+                    headers: { Accept: "application/json" },
+                    signal: controller.signal,
+                });
+
+                const data = await readResponse(response);
+
+                if (controller.signal.aborted) return;
+
+                const availableUsers = Array.isArray(data.users)
+                    ? data.users
+                    : [];
+
+                const availableRoles = Array.isArray(data.roles)
+                    ? data.roles
+                    : [];
+
+                setUsers(availableUsers);
+                setRoles(availableRoles);
+
+                setForm((current) => {
+                    const currentRoleExists = availableRoles.some(
+                        (role) =>
+                            String(role.role_id) === current.existingRoleId
+                    );
+
+                    const defaultRole =
+                        availableRoles.find(
+                            (role) =>
+                                role.role_name?.toUpperCase() === "USER"
+                        ) || availableRoles[0];
+
+                    return {
+                        ...current,
+                        existingRoleId: currentRoleExists
+                            ? current.existingRoleId
+                            : String(defaultRole?.role_id ?? ""),
+                    };
+                });
+            } catch (err) {
+                if (
+                    err.name !== "AbortError" &&
+                    !controller.signal.aborted
+                ) {
+                    setError(
+                        err.message ||
+                            "Unable to load existing users and roles."
+                    );
+                }
+            } finally {
+                if (!controller.signal.aborted) {
+                    setLoadingOptions(false);
+                }
+            }
+        }
+
+        Promise.resolve().then(() => {
+            if (!controller.signal.aborted) {
+                fetchOptions();
+            }
+        });
+
+        return () => controller.abort();
+    }, []);
+
+    function updateField(event) {
+        const { name, value } = event.target;
+
+        setForm((current) => ({
+            ...current,
+            [name]: value,
+        }));
+
+        setError("");
+        setSuccess("");
+    }
+
+    function changeAssignmentMode(mode) {
+        setForm((current) => ({
+            ...current,
+            assignmentMode: mode,
+        }));
+
+        setError("");
+        setSuccess("");
+    }
+
+    function handleLogoChange(event) {
+        const file = event.target.files?.[0];
+
+        if (!file) return;
+
+        if (!allowedLogoTypes.includes(file.type)) {
+            setError("Choose a PNG, JPG, or WebP image.");
+            event.target.value = "";
+            return;
+        }
+
+        if (file.size > MAX_LOGO_SIZE) {
+            setError("Company logo must be 2 MB or smaller.");
+            event.target.value = "";
+            return;
+        }
+
+        const reader = new FileReader();
+
+        reader.onload = () => {
+            if (typeof reader.result === "string") {
+                setLogoFile(file);
+                setLogoPreview(reader.result);
+                setError("");
+                setSuccess("");
+            }
+        };
+
+        reader.onerror = () => {
+            setError("Unable to read this image. Please try another file.");
+            event.target.value = "";
+        };
+
+        reader.readAsDataURL(file);
+    }
+
+    function removeLogo() {
+        setLogoFile(null);
+        setLogoPreview("");
+
+        const input = document.getElementById("companyLogo");
+
+        if (input) input.value = "";
+
+        setError("");
+        setSuccess("");
+    }
+
+    function validateForm() {
+        if (!form.companyName.trim()) {
+            return "Company name is required.";
+        }
+
+        if (form.assignmentMode === "existingUser") {
+            if (!form.existingUserId || !form.existingRoleId) {
+                return "Select an existing user and their role.";
+            }
+
+            if (
+                !form.companyPassword ||
+                !form.confirmCompanyPassword
+            ) {
+                return "Enter and confirm the password for this company.";
+            }
+
+            if (form.companyPassword.length < 8) {
+                return "Company password must be at least 8 characters long.";
+            }
+
+            if (form.companyPassword !== form.confirmCompanyPassword) {
+                return "Company passwords do not match.";
+            }
+        } else {
+            if (
+                !form.fullName.trim() ||
+                !form.username.trim() ||
+                !form.adminEmail.trim() ||
+                !form.password ||
+                !form.confirmPassword
+            ) {
+                return "Complete all required administrator fields.";
+            }
+
+            if (form.password.length < 8) {
+                return "Password must be at least 8 characters long.";
+            }
+
+            if (form.password !== form.confirmPassword) {
+                return "Passwords do not match.";
+            }
+        }
+
+        return "";
+    }
+
+    async function handleSubmit(event) {
+        event.preventDefault();
+
+        setError("");
+        setSuccess("");
+
+        const validationError = validateForm();
+
+        if (validationError) {
+            setError(validationError);
+            return;
+        }
+
+        setLoading(true);
+
+        try {
+            const body = new FormData();
+
+            Object.entries(form).forEach(([key, value]) => {
+                body.append(key, value);
+            });
+
+            body.set(
+                "existingUserId",
+                form.assignmentMode === "existingUser"
+                    ? form.existingUserId
+                    : ""
+            );
+
+            body.set(
+                "existingRoleId",
+                form.assignmentMode === "existingUser"
+                    ? form.existingRoleId
+                    : ""
+            );
+
+            // Do not send company-specific passwords for new-admin mode.
+            if (form.assignmentMode !== "existingUser") {
+                body.set("companyPassword", "");
+                body.set("confirmCompanyPassword", "");
+            }
+
+            if (logoFile) {
+                body.append("companyLogo", logoFile);
+            }
+
+            const response = await fetch("/api/companies/register", {
+                method: "POST",
+                headers: { Accept: "application/json" },
+                body,
+            });
+
+            const data = await readResponse(response);
+
+            setSuccess(
+                data.message || "Company registered successfully."
+            );
+
+            setForm({
+                ...initialForm,
+                assignmentMode: form.assignmentMode,
+                existingRoleId: form.existingRoleId,
+            });
+
+            setLogoFile(null);
+            setLogoPreview("");
+
+            const logoInput = document.getElementById("companyLogo");
+
+            if (logoInput) logoInput.value = "";
+        } catch (err) {
+            setError(err.message || "Company registration failed.");
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    const selectedRole = roles.find(
+        (role) => String(role.role_id) === form.existingRoleId
+    );
+
+    if (!showRegistrationForm) {
+        return (
+            <CompanySelectionView
+                onRegister={() => {
+                    setError("");
+                    setSuccess("");
+                    setShowRegistrationForm(true);
+                }}
+            />
+        );
+    }
+
+    return (
+        <main className="min-h-screen bg-gray-50 px-4 py-10">
+            <div className="mx-auto max-w-4xl">
+                <button
+                    type="button"
+                    onClick={() => {
+                        setShowRegistrationForm(false);
+                        setError("");
+                        setSuccess("");
+                    }}
+                    className="mb-6 inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-100"
+                >
+                    <ArrowLeft size={17} />
+                    Back to Companies
+                </button>
+
+                <header className="mb-8 text-center">
+                    <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center overflow-hidden rounded-2xl bg-blue-600 text-white shadow-sm">
+                        <Building2 size={32} />
+                    </div>
+
+                    <h1 className="text-3xl font-bold tracking-tight text-gray-900">
+                        Register Your Company
+                    </h1>
+
+                    <p className="mt-2 text-sm text-gray-600">
+                        Create your company profile, upload its logo,
+                        and configure initial access.
+                    </p>
+                </header>
+
+                <form
+                    onSubmit={handleSubmit}
+                    encType="multipart/form-data"
+                    className="space-y-8 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm sm:p-8"
+                >
+                    {error && (
+                        <div
+                            role="alert"
+                            className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+                        >
+                            {error}
+                        </div>
+                    )}
+
+                    {success && (
+                        <div
+                            role="status"
+                            className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700"
+                        >
+                            <p>{success}</p>
+
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setShowRegistrationForm(false);
+                                    setSuccess("");
+                                }}
+                                className="mt-2 inline-block font-semibold underline"
+                            >
+                                Return to company list
+                            </button>
+                        </div>
+                    )}
+
+                    {/* COMPANY INFORMATION */}
+                    <section>
+                        <h2 className="mb-5 flex items-center gap-2 text-lg font-semibold text-gray-900">
+                            <Building2 size={20} />
+                            Company Information
+                        </h2>
+
+                        <div className="mb-6 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-5">
+                            <label
+                                htmlFor="companyLogo"
+                                className="mb-3 block text-sm font-semibold text-gray-800"
+                            >
+                                Company Logo
+                            </label>
+
+                            <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
+                                <div className="flex h-28 w-28 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-gray-200 bg-white">
+                                    {logoPreview ? (
+                                        <img
+                                            src={logoPreview}
+                                            alt="Company logo preview"
+                                            className="h-full w-full object-contain p-2"
+                                        />
+                                    ) : (
+                                        <Building2
+                                            size={40}
+                                            className="text-gray-300"
+                                        />
+                                    )}
+                                </div>
+
+                                <div className="min-w-0 flex-1">
+                                    <p className="text-sm text-gray-600">
+                                        Upload your company logo for use in
+                                        your ERP profile.
+                                    </p>
+
+                                    <p className="mt-1 text-xs text-gray-500">
+                                        PNG, JPG, or WebP. Maximum size: 2 MB.
+                                    </p>
+
+                                    <div className="mt-3 flex flex-wrap gap-2">
+                                        <label
+                                            htmlFor="companyLogo"
+                                            className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+                                        >
+                                            <Upload size={16} />
+                                            Choose Logo
+                                        </label>
+
+                                        {logoFile && (
+                                            <button
+                                                type="button"
+                                                onClick={removeLogo}
+                                                className="inline-flex items-center gap-2 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-white"
+                                            >
+                                                <X size={16} />
+                                                Remove
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    {logoFile && (
+                                        <p className="mt-2 break-all text-xs text-gray-500">
+                                            {logoFile.name}
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
+
+                            <input
+                                id="companyLogo"
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp"
+                                onChange={handleLogoChange}
+                                className="sr-only"
+                            />
+                        </div>
+
+                        <div className="grid gap-4 sm:grid-cols-2">
+                            <div className="sm:col-span-2">
+                                <label htmlFor="companyName" className={labelClass}>
+                                    Company Name *
+                                </label>
+                                <input
+                                    id="companyName"
+                                    name="companyName"
+                                    value={form.companyName}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="ABC Traders"
+                                    maxLength={150}
+                                    required
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="phone" className={labelClass}>
+                                    Phone
+                                </label>
+                                <input
+                                    id="phone"
+                                    name="phone"
+                                    type="tel"
+                                    value={form.phone}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="+92 300 1234567"
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="companyEmail" className={labelClass}>
+                                    Company Email
+                                </label>
+                                <input
+                                    id="companyEmail"
+                                    type="email"
+                                    name="companyEmail"
+                                    value={form.companyEmail}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="info@example.com"
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="currency" className={labelClass}>
+                                    Currency *
+                                </label>
+                                <select
+                                    id="currency"
+                                    name="currency"
+                                    value={form.currency}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    required
+                                >
+                                    <option value="PKR">PKR - Pakistani Rupee</option>
+                                    <option value="USD">USD - US Dollar</option>
+                                    <option value="EUR">EUR - Euro</option>
+                                    <option value="GBP">GBP - British Pound</option>
+                                    <option value="AED">AED - UAE Dirham</option>
+                                </select>
+                            </div>
+                        </div>
+                    </section>
+
+                    <hr className="border-gray-200" />
+
+                    {/* COMPANY LOCATION */}
+                    <section>
+                        <h2 className="mb-2 flex items-center gap-2 text-lg font-semibold text-gray-900">
+                            <MapPin size={20} />
+                            Company Location
+                        </h2>
+
+                        <p className="mb-4 text-sm text-gray-500">
+                            Enter the registered or business address.
+                        </p>
+
+                        <div className="grid gap-4 sm:grid-cols-2">
+                            <div className="sm:col-span-2">
+                                <label htmlFor="address" className={labelClass}>
+                                    Street Address
+                                </label>
+                                <textarea
+                                    id="address"
+                                    name="address"
+                                    value={form.address}
+                                    onChange={updateField}
+                                    className={`${inputClass} min-h-20 resize-y`}
+                                    placeholder="Street, building, plaza, or area"
+                                    maxLength={500}
+                                    rows={3}
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="city" className={labelClass}>
+                                    City
+                                </label>
+                                <input
+                                    id="city"
+                                    name="city"
+                                    value={form.city}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="Faisalabad"
+                                    maxLength={100}
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="province" className={labelClass}>
+                                    State / Province
+                                </label>
+                                <input
+                                    id="province"
+                                    name="province"
+                                    value={form.province}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="Punjab"
+                                    maxLength={100}
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="country" className={labelClass}>
+                                    Country
+                                </label>
+                                <input
+                                    id="country"
+                                    name="country"
+                                    value={form.country}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="Pakistan"
+                                    maxLength={100}
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="postalCode" className={labelClass}>
+                                    Postal Code
+                                </label>
+                                <input
+                                    id="postalCode"
+                                    name="postalCode"
+                                    value={form.postalCode}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="38000"
+                                    maxLength={20}
+                                />
+                            </div>
+                        </div>
+                    </section>
+
+                    <hr className="border-gray-200" />
+
+                    {/* INITIAL COMPANY ACCESS */}
+                    <section>
+                        <h2 className="mb-2 flex items-center gap-2 text-lg font-semibold text-gray-900">
+                            <UserRound size={20} />
+                            Initial Company Access
+                        </h2>
+
+                        <p className="mb-4 text-sm text-gray-500">
+                            Create a new administrator or assign an existing
+                            login account to this company.
+                        </p>
+
+                        <div className="mb-5 grid gap-3 sm:grid-cols-2">
+                            <button
+                                type="button"
+                                onClick={() => changeAssignmentMode("newAdmin")}
+                                aria-pressed={form.assignmentMode === "newAdmin"}
+                                className={`rounded-xl border p-4 text-left transition ${
+                                    form.assignmentMode === "newAdmin"
+                                        ? "border-blue-600 bg-blue-50 ring-1 ring-blue-600"
+                                        : "border-gray-200 hover:bg-gray-50"
+                                }`}
+                            >
+                                <span className="block font-semibold text-gray-900">
+                                    Create New Administrator
+                                </span>
+                                <span className="mt-1 block text-sm text-gray-500">
+                                    Create a new login and assign ADMIN.
+                                </span>
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => changeAssignmentMode("existingUser")}
+                                aria-pressed={form.assignmentMode === "existingUser"}
+                                className={`rounded-xl border p-4 text-left transition ${
+                                    form.assignmentMode === "existingUser"
+                                        ? "border-blue-600 bg-blue-50 ring-1 ring-blue-600"
+                                        : "border-gray-200 hover:bg-gray-50"
+                                }`}
+                            >
+                                <span className="block font-semibold text-gray-900">
+                                    Assign Existing User
+                                </span>
+                                <span className="mt-1 block text-sm text-gray-500">
+                                    Reuse an existing login account with a
+                                    separate password for this company.
+                                </span>
+                            </button>
+                        </div>
+
+                        {form.assignmentMode === "newAdmin" ? (
+                            <>
+                                <p className="mb-4 rounded-lg bg-gray-50 p-3 text-sm text-gray-600">
+                                    This creates a separate user account with
+                                    the built-in ADMIN role. Usernames and
+                                    emails must be unique.
+                                </p>
+
+                                <div className="grid gap-4 sm:grid-cols-2">
+                                    <div>
+                                        <label htmlFor="fullName" className={labelClass}>
+                                            Full Name *
+                                        </label>
+                                        <input
+                                            id="fullName"
+                                            name="fullName"
+                                            value={form.fullName}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            maxLength={150}
+                                            autoComplete="name"
+                                            required
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label htmlFor="username" className={labelClass}>
+                                            Username *
+                                        </label>
+                                        <input
+                                            id="username"
+                                            name="username"
+                                            value={form.username}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            minLength={3}
+                                            maxLength={100}
+                                            autoComplete="username"
+                                            required
+                                        />
+                                    </div>
+
+                                    <div className="sm:col-span-2">
+                                        <label htmlFor="adminEmail" className={labelClass}>
+                                            Administrator Email *
+                                        </label>
+                                        <input
+                                            id="adminEmail"
+                                            type="email"
+                                            name="adminEmail"
+                                            value={form.adminEmail}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            autoComplete="email"
+                                            required
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label htmlFor="password" className={labelClass}>
+                                            Password *
+                                        </label>
+                                        <input
+                                            id="password"
+                                            type="password"
+                                            name="password"
+                                            value={form.password}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            minLength={8}
+                                            autoComplete="new-password"
+                                            required
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label htmlFor="confirmPassword" className={labelClass}>
+                                            Confirm Password *
+                                        </label>
+                                        <input
+                                            id="confirmPassword"
+                                            type="password"
+                                            name="confirmPassword"
+                                            value={form.confirmPassword}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            minLength={8}
+                                            autoComplete="new-password"
+                                            required
+                                        />
+                                    </div>
+                                </div>
+                            </>
+                        ) : (
+                            <div className="space-y-4">
+                                <div>
+                                    <label
+                                        htmlFor="existingUserId"
+                                        className={labelClass}
+                                    >
+                                        Select Existing User *
+                                    </label>
+                                    <select
+                                        id="existingUserId"
+                                        name="existingUserId"
+                                        value={form.existingUserId}
+                                        onChange={updateField}
+                                        className={inputClass}
+                                        required
+                                        disabled={
+                                            loadingOptions || users.length === 0
+                                        }
+                                    >
+                                        <option value="">
+                                            {loadingOptions
+                                                ? "Loading users..."
+                                                : "Select an existing user"}
+                                        </option>
+
+                                        {users.map((user) => (
+                                            <option
+                                                key={user.user_id}
+                                                value={String(user.user_id)}
+                                            >
+                                                {user.full_name} (@{user.username})
+                                                {user.email ? ` — ${user.email}` : ""}
+                                            </option>
+                                        ))}
+                                    </select>
+
+                                    {!loadingOptions && users.length === 0 && (
+                                        <p className="mt-2 text-sm text-amber-700">
+                                            No existing users are available for
+                                            assignment.
+                                        </p>
+                                    )}
+                                </div>
+
+                                <div>
+                                    <label
+                                        htmlFor="existingRoleId"
+                                        className={labelClass}
+                                    >
+                                        Role in New Company *
+                                    </label>
+                                    <select
+                                        id="existingRoleId"
+                                        name="existingRoleId"
+                                        value={form.existingRoleId}
+                                        onChange={updateField}
+                                        className={inputClass}
+                                        required
+                                        disabled={
+                                            loadingOptions || roles.length === 0
+                                        }
+                                    >
+                                        <option value="">Select a role</option>
+
+                                        {roles.map((role) => (
+                                            <option
+                                                key={role.role_id}
+                                                value={String(role.role_id)}
+                                            >
+                                                {role.role_name}
+                                            </option>
+                                        ))}
+                                    </select>
+
+                                    {selectedRole && (
+                                        <p className="mt-2 text-xs text-gray-500">
+                                            Selected role: {selectedRole.role_name}
+                                        </p>
+                                    )}
+                                </div>
+
+                                <div className="grid gap-4 sm:grid-cols-2">
+                                    <div>
+                                        <label
+                                            htmlFor="companyPassword"
+                                            className={labelClass}
+                                        >
+                                            Password for This Company *
+                                        </label>
+                                        <input
+                                            id="companyPassword"
+                                            type="password"
+                                            name="companyPassword"
+                                            value={form.companyPassword}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            minLength={8}
+                                            autoComplete="new-password"
+                                            required
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label
+                                            htmlFor="confirmCompanyPassword"
+                                            className={labelClass}
+                                        >
+                                            Confirm Company Password *
+                                        </label>
+                                        <input
+                                            id="confirmCompanyPassword"
+                                            type="password"
+                                            name="confirmCompanyPassword"
+                                            value={form.confirmCompanyPassword}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            minLength={8}
+                                            autoComplete="new-password"
+                                            required
+                                        />
+                                    </div>
+                                </div>
+
+                                <p className="rounded-lg bg-blue-50 p-3 text-sm text-blue-800">
+                                    This password is intended for this company
+                                    only. The selected user keeps their
+                                    username and email. Their passwords for
+                                    other companies must remain unchanged.
+                                </p>
+                            </div>
+                        )}
+                    </section>
+
+                    <button
+                        type="submit"
+                        disabled={
+                            loading ||
+                            loadingOptions ||
+                            (form.assignmentMode === "existingUser" &&
+                                (
+                                    !form.existingUserId ||
+                                    !form.existingRoleId ||
+                                    !form.companyPassword ||
+                                    !form.confirmCompanyPassword
+                                ))
+                        }
+                        className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-3 font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                        {loading && (
+                            <LoaderCircle className="animate-spin" size={18} />
+                        )}
+
+                        {loading
+                            ? "Registering Company..."
+                            : "Register Company"}
+                    </button>
+
+                    <p className="text-center text-sm text-gray-600">
+                        <button
+                            type="button"
+                            onClick={() => setShowRegistrationForm(false)}
+                            className="font-semibold text-blue-600 hover:underline"
+                        >
+                            Return to company list
+                        </button>
+                    </p>
+                </form>
+            </div>
+        </main>
+    );
+}
+
+
+
+========== app\dashboard\register-company\page.js ==========
+
+
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import {
+    Building2,
+    UserRound,
+    LoaderCircle,
+    Upload,
+    MapPin,
+    X,
+    ArrowLeft,
+    Plus,
+    RefreshCw,
+    LogIn,
+    Pencil,
+} from "lucide-react";
+
+const initialForm = {
+    companyName: "",
+    phone: "",
+    companyEmail: "",
+    address: "",
+    city: "",
+    province: "",
+    country: "Pakistan",
+    postalCode: "",
+    currency: "PKR",
+    assignmentMode: "newAdmin",
+    fullName: "",
+    username: "",
+    adminEmail: "",
+    password: "",
+    confirmPassword: "",
+    existingUserId: "",
+    existingRoleId: "",
+    companyPassword: "",
+    confirmCompanyPassword: "",
+};
+
+const inputClass =
+    "w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm text-gray-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100";
+
+const labelClass = "mb-1.5 block text-sm font-medium text-gray-700";
+
+const MAX_LOGO_SIZE = 2 * 1024 * 1024;
+const allowedLogoTypes = ["image/png", "image/jpeg", "image/webp"];
+
+async function readResponse(response) {
+    const text = await response.text();
+    let data = {};
+
+    if (text) {
+        try {
+            data = JSON.parse(text);
+        } catch {
+            throw new Error(
+                `Invalid server response (HTTP ${response.status}). Check the API route.`
+            );
+        }
+    }
+
+    if (!response.ok) {
+        throw new Error(
+            data.message || `Request failed (HTTP ${response.status}).`
+        );
+    }
+
+    return data;
+}
+
+function CompanySelectionView({ onRegister }) {
+    const [companies, setCompanies] = useState([]);
+    const [loadingCompanies, setLoadingCompanies] = useState(true);
+    const [companyError, setCompanyError] = useState("");
+
+    async function loadCompanies(signal) {
+        try {
+            const response = await fetch("/api/settings/list", {
+                method: "GET",
+                cache: "no-store",
+                headers: { Accept: "application/json" },
+                signal,
+            });
+
+            const data = await readResponse(response);
+
+            if (!signal.aborted) {
+                setCompanies(
+                    Array.isArray(data.companies) ? data.companies : []
+                );
+                setCompanyError("");
+            }
+        } catch (error) {
+            if (error.name !== "AbortError" && !signal.aborted) {
+                setCompanyError(
+                    error.message || "Unable to load companies."
+                );
+            }
+        } finally {
+            if (!signal.aborted) {
+                setLoadingCompanies(false);
+            }
+        }
+    }
+
+    useEffect(() => {
+        const controller = new AbortController();
+
+        Promise.resolve().then(() => {
+            if (!controller.signal.aborted) {
+                loadCompanies(controller.signal);
+            }
+        });
+
+        return () => controller.abort();
+    }, []);
+
+    function retryLoadingCompanies() {
+        const controller = new AbortController();
+
+        setLoadingCompanies(true);
+        setCompanyError("");
+
+        loadCompanies(controller.signal);
+    }
+
+    return (
+        <main className="min-h-screen bg-gray-50 px-4 py-10">
+            <div className="mx-auto max-w-6xl">
+                <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <div className="mb-2 flex items-center gap-2 text-sm font-medium text-blue-600">
+                            <Building2 size={18} />
+                            Company Management
+                        </div>
+
+                        <h1 className="text-3xl font-bold tracking-tight text-gray-900">
+                            Your Companies
+                        </h1>
+
+                        <p className="mt-2 text-sm text-gray-600">
+                            Log in to a company or register a new company.
+                            Only authorized company administrators can edit
+                            company information.
+                        </p>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={onRegister}
+                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
+                    >
+                        <Plus size={19} />
+                        Register New Company
+                    </button>
+                </header>
+
+                {companyError && (
+                    <div
+                        role="alert"
+                        className="mb-6 flex flex-col gap-3 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                        <span>{companyError}</span>
+
+                        <button
+                            type="button"
+                            onClick={retryLoadingCompanies}
+                            className="inline-flex items-center gap-2 font-semibold"
+                        >
+                            <RefreshCw size={15} />
+                            Retry
+                        </button>
+                    </div>
+                )}
+
+                {loadingCompanies ? (
+                    <div className="flex min-h-64 items-center justify-center gap-3 text-gray-500">
+                        <LoaderCircle
+                            size={23}
+                            className="animate-spin text-blue-600"
+                        />
+                        Loading companies...
+                    </div>
+                ) : companies.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center">
+                        <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-50 text-blue-600">
+                            <Building2 size={32} />
+                        </div>
+
+                        <h2 className="text-xl font-semibold text-gray-900">
+                            No Companies Yet
+                        </h2>
+
+                        <p className="mx-auto mt-2 max-w-md text-sm text-gray-500">
+                            Register your first company to start managing its
+                            users, inventory, sales, purchases, and accounts.
+                        </p>
+
+                        <button
+                            type="button"
+                            onClick={onRegister}
+                            className="mt-6 inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-3 font-semibold text-white hover:bg-blue-700"
+                        >
+                            <Plus size={18} />
+                            Register Your First Company
+                        </button>
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+                        {companies.map((company) => (
+                            <article
+                                key={company.company_id}
+                                className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
+                            >
+                                <div className="flex h-40 items-center justify-center border-b border-gray-100 bg-gray-50 p-5">
+                                    {company.logo_url ? (
+                                        <img
+                                            src={company.logo_url}
+                                            alt={`${company.company_name} logo`}
+                                            className="h-full max-w-full object-contain"
+                                        />
+                                    ) : (
+                                        <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-blue-100 text-blue-600">
+                                            <Building2 size={42} />
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="p-5">
+                                    <h2 className="truncate text-lg font-bold text-gray-900">
+                                        {company.company_name}
+                                    </h2>
+
+                                    <div className="mt-4 space-y-2.5 text-sm text-gray-600">
+                                        {(
+                                            company.address ||
+                                            company.city ||
+                                            company.location
+                                        ) && (
+                                            <div className="flex items-start gap-2">
+                                                <MapPin
+                                                    size={16}
+                                                    className="mt-0.5 shrink-0 text-gray-400"
+                                                />
+                                                <span>
+                                                    {[
+                                                        company.address,
+                                                        company.city,
+                                                        company.location,
+                                                    ]
+                                                        .filter(Boolean)
+                                                        .filter(
+                                                            (value, index, array) =>
+                                                                array.indexOf(value) ===
+                                                                index
+                                                        )
+                                                        .join(", ")}
+                                                </span>
+                                            </div>
+                                        )}
+
+                                        {company.phone && (
+                                            <p className="break-words">
+                                                <span className="font-medium text-gray-700">
+                                                    Phone:
+                                                </span>{" "}
+                                                {company.phone}
+                                            </p>
+                                        )}
+
+                                        {company.email && (
+                                            <p className="break-all">
+                                                <span className="font-medium text-gray-700">
+                                                    Email:
+                                                </span>{" "}
+                                                {company.email}
+                                            </p>
+                                        )}
+
+                                        {company.currency && (
+                                            <p>
+                                                <span className="font-medium text-gray-700">
+                                                    Currency:
+                                                </span>{" "}
+                                                {company.currency}
+                                            </p>
+                                        )}
+                                    </div>
+
+                                    <div className="mt-5 grid grid-cols-2 gap-3">
+                                        <Link
+                                             href={`/login?companyId=${encodeURIComponent(company.company_id)}&companyName=${encodeURIComponent(company.company_name)}`}
+                                            className="flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700"
+                                        >
+                                            <LogIn size={16} />
+                                            Login
+                                        </Link>
+
+                                        <Link
+                                            href={`/companies/edit/${encodeURIComponent(
+                                                company.company_id
+                                            )}`}
+                                            className="flex items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm font-semibold text-gray-700 transition hover:bg-gray-50"
+                                        >
+                                            <Pencil size={15} />
+                                            Edit
+                                        </Link>
+                                    </div>
+                                </div>
+                            </article>
+                        ))}
+                    </div>
+                )}
+            </div>
+        </main>
+    );
+}
+
+export default function RegisterCompanyPage() {
+    const [showRegistrationForm, setShowRegistrationForm] = useState(false);
+
+    const [form, setForm] = useState(initialForm);
+    const [users, setUsers] = useState([]);
+    const [roles, setRoles] = useState([]);
+
+    const [logoFile, setLogoFile] = useState(null);
+    const [logoPreview, setLogoPreview] = useState("");
+
+    const [loadingOptions, setLoadingOptions] = useState(true);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState("");
+    const [success, setSuccess] = useState("");
+
+    useEffect(() => {
+        const controller = new AbortController();
+
+        async function fetchOptions() {
+            try {
+                const response = await fetch("/api/companies/register", {
+                    method: "GET",
+                    cache: "no-store",
+                    headers: { Accept: "application/json" },
+                    signal: controller.signal,
+                });
+
+                const data = await readResponse(response);
+
+                if (controller.signal.aborted) return;
+
+                const availableUsers = Array.isArray(data.users)
+                    ? data.users
+                    : [];
+
+                const availableRoles = Array.isArray(data.roles)
+                    ? data.roles
+                    : [];
+
+                setUsers(availableUsers);
+                setRoles(availableRoles);
+
+                setForm((current) => {
+                    const currentRoleExists = availableRoles.some(
+                        (role) =>
+                            String(role.role_id) === current.existingRoleId
+                    );
+
+                    const defaultRole =
+                        availableRoles.find(
+                            (role) =>
+                                role.role_name?.toUpperCase() === "USER"
+                        ) || availableRoles[0];
+
+                    return {
+                        ...current,
+                        existingRoleId: currentRoleExists
+                            ? current.existingRoleId
+                            : String(defaultRole?.role_id ?? ""),
+                    };
+                });
+            } catch (err) {
+                if (
+                    err.name !== "AbortError" &&
+                    !controller.signal.aborted
+                ) {
+                    setError(
+                        err.message ||
+                            "Unable to load existing users and roles."
+                    );
+                }
+            } finally {
+                if (!controller.signal.aborted) {
+                    setLoadingOptions(false);
+                }
+            }
+        }
+
+        Promise.resolve().then(() => {
+            if (!controller.signal.aborted) {
+                fetchOptions();
+            }
+        });
+
+        return () => controller.abort();
+    }, []);
+
+    function updateField(event) {
+        const { name, value } = event.target;
+
+        setForm((current) => ({
+            ...current,
+            [name]: value,
+        }));
+
+        setError("");
+        setSuccess("");
+    }
+
+    function changeAssignmentMode(mode) {
+        setForm((current) => ({
+            ...current,
+            assignmentMode: mode,
+        }));
+
+        setError("");
+        setSuccess("");
+    }
+
+    function handleLogoChange(event) {
+        const file = event.target.files?.[0];
+
+        if (!file) return;
+
+        if (!allowedLogoTypes.includes(file.type)) {
+            setError("Choose a PNG, JPG, or WebP image.");
+            event.target.value = "";
+            return;
+        }
+
+        if (file.size > MAX_LOGO_SIZE) {
+            setError("Company logo must be 2 MB or smaller.");
+            event.target.value = "";
+            return;
+        }
+
+        const reader = new FileReader();
+
+        reader.onload = () => {
+            if (typeof reader.result === "string") {
+                setLogoFile(file);
+                setLogoPreview(reader.result);
+                setError("");
+                setSuccess("");
+            }
+        };
+
+        reader.onerror = () => {
+            setError("Unable to read this image. Please try another file.");
+            event.target.value = "";
+        };
+
+        reader.readAsDataURL(file);
+    }
+
+    function removeLogo() {
+        setLogoFile(null);
+        setLogoPreview("");
+
+        const input = document.getElementById("companyLogo");
+
+        if (input) input.value = "";
+
+        setError("");
+        setSuccess("");
+    }
+
+    function validateForm() {
+        if (!form.companyName.trim()) {
+            return "Company name is required.";
+        }
+
+        if (form.assignmentMode === "existingUser") {
+            if (!form.existingUserId || !form.existingRoleId) {
+                return "Select an existing user and their role.";
+            }
+
+            if (
+                !form.companyPassword ||
+                !form.confirmCompanyPassword
+            ) {
+                return "Enter and confirm the password for this company.";
+            }
+
+            if (form.companyPassword.length < 8) {
+                return "Company password must be at least 8 characters long.";
+            }
+
+            if (form.companyPassword !== form.confirmCompanyPassword) {
+                return "Company passwords do not match.";
+            }
+        } else {
+            if (
+                !form.fullName.trim() ||
+                !form.username.trim() ||
+                !form.adminEmail.trim() ||
+                !form.password ||
+                !form.confirmPassword
+            ) {
+                return "Complete all required administrator fields.";
+            }
+
+            if (form.password.length < 8) {
+                return "Password must be at least 8 characters long.";
+            }
+
+            if (form.password !== form.confirmPassword) {
+                return "Passwords do not match.";
+            }
+        }
+
+        return "";
+    }
+
+    async function handleSubmit(event) {
+        event.preventDefault();
+
+        setError("");
+        setSuccess("");
+
+        const validationError = validateForm();
+
+        if (validationError) {
+            setError(validationError);
+            return;
+        }
+
+        setLoading(true);
+
+        try {
+            const body = new FormData();
+
+            Object.entries(form).forEach(([key, value]) => {
+                body.append(key, value);
+            });
+
+            body.set(
+                "existingUserId",
+                form.assignmentMode === "existingUser"
+                    ? form.existingUserId
+                    : ""
+            );
+
+            body.set(
+                "existingRoleId",
+                form.assignmentMode === "existingUser"
+                    ? form.existingRoleId
+                    : ""
+            );
+
+            // Do not send company-specific passwords for new-admin mode.
+            if (form.assignmentMode !== "existingUser") {
+                body.set("companyPassword", "");
+                body.set("confirmCompanyPassword", "");
+            }
+
+            if (logoFile) {
+                body.append("companyLogo", logoFile);
+            }
+
+            const response = await fetch("/api/companies/register", {
+                method: "POST",
+                headers: { Accept: "application/json" },
+                body,
+            });
+
+            const data = await readResponse(response);
+
+            setSuccess(
+                data.message || "Company registered successfully."
+            );
+
+            setForm({
+                ...initialForm,
+                assignmentMode: form.assignmentMode,
+                existingRoleId: form.existingRoleId,
+            });
+
+            setLogoFile(null);
+            setLogoPreview("");
+
+            const logoInput = document.getElementById("companyLogo");
+
+            if (logoInput) logoInput.value = "";
+        } catch (err) {
+            setError(err.message || "Company registration failed.");
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    const selectedRole = roles.find(
+        (role) => String(role.role_id) === form.existingRoleId
+    );
+
+    if (!showRegistrationForm) {
+        return (
+            <CompanySelectionView
+                onRegister={() => {
+                    setError("");
+                    setSuccess("");
+                    setShowRegistrationForm(true);
+                }}
+            />
+        );
+    }
+
+    return (
+        <main className="min-h-screen bg-gray-50 px-4 py-10">
+            <div className="mx-auto max-w-4xl">
+                <button
+                    type="button"
+                    onClick={() => {
+                        setShowRegistrationForm(false);
+                        setError("");
+                        setSuccess("");
+                    }}
+                    className="mb-6 inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-100"
+                >
+                    <ArrowLeft size={17} />
+                    Back to Companies
+                </button>
+
+                <header className="mb-8 text-center">
+                    <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center overflow-hidden rounded-2xl bg-blue-600 text-white shadow-sm">
+                        <Building2 size={32} />
+                    </div>
+
+                    <h1 className="text-3xl font-bold tracking-tight text-gray-900">
+                        Register Your Company
+                    </h1>
+
+                    <p className="mt-2 text-sm text-gray-600">
+                        Create your company profile, upload its logo,
+                        and configure initial access.
+                    </p>
+                </header>
+
+                <form
+                    onSubmit={handleSubmit}
+                    encType="multipart/form-data"
+                    className="space-y-8 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm sm:p-8"
+                >
+                    {error && (
+                        <div
+                            role="alert"
+                            className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+                        >
+                            {error}
+                        </div>
+                    )}
+
+                    {success && (
+                        <div
+                            role="status"
+                            className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700"
+                        >
+                            <p>{success}</p>
+
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setShowRegistrationForm(false);
+                                    setSuccess("");
+                                }}
+                                className="mt-2 inline-block font-semibold underline"
+                            >
+                                Return to company list
+                            </button>
+                        </div>
+                    )}
+
+                    {/* COMPANY INFORMATION */}
+                    <section>
+                        <h2 className="mb-5 flex items-center gap-2 text-lg font-semibold text-gray-900">
+                            <Building2 size={20} />
+                            Company Information
+                        </h2>
+
+                        <div className="mb-6 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-5">
+                            <label
+                                htmlFor="companyLogo"
+                                className="mb-3 block text-sm font-semibold text-gray-800"
+                            >
+                                Company Logo
+                            </label>
+
+                            <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
+                                <div className="flex h-28 w-28 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-gray-200 bg-white">
+                                    {logoPreview ? (
+                                        <img
+                                            src={logoPreview}
+                                            alt="Company logo preview"
+                                            className="h-full w-full object-contain p-2"
+                                        />
+                                    ) : (
+                                        <Building2
+                                            size={40}
+                                            className="text-gray-300"
+                                        />
+                                    )}
+                                </div>
+
+                                <div className="min-w-0 flex-1">
+                                    <p className="text-sm text-gray-600">
+                                        Upload your company logo for use in
+                                        your ERP profile.
+                                    </p>
+
+                                    <p className="mt-1 text-xs text-gray-500">
+                                        PNG, JPG, or WebP. Maximum size: 2 MB.
+                                    </p>
+
+                                    <div className="mt-3 flex flex-wrap gap-2">
+                                        <label
+                                            htmlFor="companyLogo"
+                                            className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+                                        >
+                                            <Upload size={16} />
+                                            Choose Logo
+                                        </label>
+
+                                        {logoFile && (
+                                            <button
+                                                type="button"
+                                                onClick={removeLogo}
+                                                className="inline-flex items-center gap-2 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-white"
+                                            >
+                                                <X size={16} />
+                                                Remove
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    {logoFile && (
+                                        <p className="mt-2 break-all text-xs text-gray-500">
+                                            {logoFile.name}
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
+
+                            <input
+                                id="companyLogo"
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp"
+                                onChange={handleLogoChange}
+                                className="sr-only"
+                            />
+                        </div>
+
+                        <div className="grid gap-4 sm:grid-cols-2">
+                            <div className="sm:col-span-2">
+                                <label htmlFor="companyName" className={labelClass}>
+                                    Company Name *
+                                </label>
+                                <input
+                                    id="companyName"
+                                    name="companyName"
+                                    value={form.companyName}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="ABC Traders"
+                                    maxLength={150}
+                                    required
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="phone" className={labelClass}>
+                                    Phone
+                                </label>
+                                <input
+                                    id="phone"
+                                    name="phone"
+                                    type="tel"
+                                    value={form.phone}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="+92 300 1234567"
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="companyEmail" className={labelClass}>
+                                    Company Email
+                                </label>
+                                <input
+                                    id="companyEmail"
+                                    type="email"
+                                    name="companyEmail"
+                                    value={form.companyEmail}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="info@example.com"
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="currency" className={labelClass}>
+                                    Currency *
+                                </label>
+                                <select
+                                    id="currency"
+                                    name="currency"
+                                    value={form.currency}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    required
+                                >
+                                    <option value="PKR">PKR - Pakistani Rupee</option>
+                                    <option value="USD">USD - US Dollar</option>
+                                    <option value="EUR">EUR - Euro</option>
+                                    <option value="GBP">GBP - British Pound</option>
+                                    <option value="AED">AED - UAE Dirham</option>
+                                </select>
+                            </div>
+                        </div>
+                    </section>
+
+                    <hr className="border-gray-200" />
+
+                    {/* COMPANY LOCATION */}
+                    <section>
+                        <h2 className="mb-2 flex items-center gap-2 text-lg font-semibold text-gray-900">
+                            <MapPin size={20} />
+                            Company Location
+                        </h2>
+
+                        <p className="mb-4 text-sm text-gray-500">
+                            Enter the registered or business address.
+                        </p>
+
+                        <div className="grid gap-4 sm:grid-cols-2">
+                            <div className="sm:col-span-2">
+                                <label htmlFor="address" className={labelClass}>
+                                    Street Address
+                                </label>
+                                <textarea
+                                    id="address"
+                                    name="address"
+                                    value={form.address}
+                                    onChange={updateField}
+                                    className={`${inputClass} min-h-20 resize-y`}
+                                    placeholder="Street, building, plaza, or area"
+                                    maxLength={500}
+                                    rows={3}
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="city" className={labelClass}>
+                                    City
+                                </label>
+                                <input
+                                    id="city"
+                                    name="city"
+                                    value={form.city}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="Faisalabad"
+                                    maxLength={100}
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="province" className={labelClass}>
+                                    State / Province
+                                </label>
+                                <input
+                                    id="province"
+                                    name="province"
+                                    value={form.province}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="Punjab"
+                                    maxLength={100}
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="country" className={labelClass}>
+                                    Country
+                                </label>
+                                <input
+                                    id="country"
+                                    name="country"
+                                    value={form.country}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="Pakistan"
+                                    maxLength={100}
+                                />
+                            </div>
+
+                            <div>
+                                <label htmlFor="postalCode" className={labelClass}>
+                                    Postal Code
+                                </label>
+                                <input
+                                    id="postalCode"
+                                    name="postalCode"
+                                    value={form.postalCode}
+                                    onChange={updateField}
+                                    className={inputClass}
+                                    placeholder="38000"
+                                    maxLength={20}
+                                />
+                            </div>
+                        </div>
+                    </section>
+
+                    <hr className="border-gray-200" />
+
+                    {/* INITIAL COMPANY ACCESS */}
+                    <section>
+                        <h2 className="mb-2 flex items-center gap-2 text-lg font-semibold text-gray-900">
+                            <UserRound size={20} />
+                            Initial Company Access
+                        </h2>
+
+                        <p className="mb-4 text-sm text-gray-500">
+                            Create a new administrator or assign an existing
+                            login account to this company.
+                        </p>
+
+                        <div className="mb-5 grid gap-3 sm:grid-cols-2">
+                            <button
+                                type="button"
+                                onClick={() => changeAssignmentMode("newAdmin")}
+                                aria-pressed={form.assignmentMode === "newAdmin"}
+                                className={`rounded-xl border p-4 text-left transition ${
+                                    form.assignmentMode === "newAdmin"
+                                        ? "border-blue-600 bg-blue-50 ring-1 ring-blue-600"
+                                        : "border-gray-200 hover:bg-gray-50"
+                                }`}
+                            >
+                                <span className="block font-semibold text-gray-900">
+                                    Create New Administrator
+                                </span>
+                                <span className="mt-1 block text-sm text-gray-500">
+                                    Create a new login and assign ADMIN.
+                                </span>
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => changeAssignmentMode("existingUser")}
+                                aria-pressed={form.assignmentMode === "existingUser"}
+                                className={`rounded-xl border p-4 text-left transition ${
+                                    form.assignmentMode === "existingUser"
+                                        ? "border-blue-600 bg-blue-50 ring-1 ring-blue-600"
+                                        : "border-gray-200 hover:bg-gray-50"
+                                }`}
+                            >
+                                <span className="block font-semibold text-gray-900">
+                                    Assign Existing User
+                                </span>
+                                <span className="mt-1 block text-sm text-gray-500">
+                                    Reuse an existing login account with a
+                                    separate password for this company.
+                                </span>
+                            </button>
+                        </div>
+
+                        {form.assignmentMode === "newAdmin" ? (
+                            <>
+                                <p className="mb-4 rounded-lg bg-gray-50 p-3 text-sm text-gray-600">
+                                    This creates a separate user account with
+                                    the built-in ADMIN role. Usernames and
+                                    emails must be unique.
+                                </p>
+
+                                <div className="grid gap-4 sm:grid-cols-2">
+                                    <div>
+                                        <label htmlFor="fullName" className={labelClass}>
+                                            Full Name *
+                                        </label>
+                                        <input
+                                            id="fullName"
+                                            name="fullName"
+                                            value={form.fullName}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            maxLength={150}
+                                            autoComplete="name"
+                                            required
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label htmlFor="username" className={labelClass}>
+                                            Username *
+                                        </label>
+                                        <input
+                                            id="username"
+                                            name="username"
+                                            value={form.username}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            minLength={3}
+                                            maxLength={100}
+                                            autoComplete="username"
+                                            required
+                                        />
+                                    </div>
+
+                                    <div className="sm:col-span-2">
+                                        <label htmlFor="adminEmail" className={labelClass}>
+                                            Administrator Email *
+                                        </label>
+                                        <input
+                                            id="adminEmail"
+                                            type="email"
+                                            name="adminEmail"
+                                            value={form.adminEmail}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            autoComplete="email"
+                                            required
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label htmlFor="password" className={labelClass}>
+                                            Password *
+                                        </label>
+                                        <input
+                                            id="password"
+                                            type="password"
+                                            name="password"
+                                            value={form.password}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            minLength={8}
+                                            autoComplete="new-password"
+                                            required
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label htmlFor="confirmPassword" className={labelClass}>
+                                            Confirm Password *
+                                        </label>
+                                        <input
+                                            id="confirmPassword"
+                                            type="password"
+                                            name="confirmPassword"
+                                            value={form.confirmPassword}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            minLength={8}
+                                            autoComplete="new-password"
+                                            required
+                                        />
+                                    </div>
+                                </div>
+                            </>
+                        ) : (
+                            <div className="space-y-4">
+                                <div>
+                                    <label
+                                        htmlFor="existingUserId"
+                                        className={labelClass}
+                                    >
+                                        Select Existing User *
+                                    </label>
+                                    <select
+                                        id="existingUserId"
+                                        name="existingUserId"
+                                        value={form.existingUserId}
+                                        onChange={updateField}
+                                        className={inputClass}
+                                        required
+                                        disabled={
+                                            loadingOptions || users.length === 0
+                                        }
+                                    >
+                                        <option value="">
+                                            {loadingOptions
+                                                ? "Loading users..."
+                                                : "Select an existing user"}
+                                        </option>
+
+                                        {users.map((user) => (
+                                            <option
+                                                key={user.user_id}
+                                                value={String(user.user_id)}
+                                            >
+                                                {user.full_name} (@{user.username})
+                                                {user.email ? ` — ${user.email}` : ""}
+                                            </option>
+                                        ))}
+                                    </select>
+
+                                    {!loadingOptions && users.length === 0 && (
+                                        <p className="mt-2 text-sm text-amber-700">
+                                            No existing users are available for
+                                            assignment.
+                                        </p>
+                                    )}
+                                </div>
+
+                                <div>
+                                    <label
+                                        htmlFor="existingRoleId"
+                                        className={labelClass}
+                                    >
+                                        Role in New Company *
+                                    </label>
+                                    <select
+                                        id="existingRoleId"
+                                        name="existingRoleId"
+                                        value={form.existingRoleId}
+                                        onChange={updateField}
+                                        className={inputClass}
+                                        required
+                                        disabled={
+                                            loadingOptions || roles.length === 0
+                                        }
+                                    >
+                                        <option value="">Select a role</option>
+
+                                        {roles.map((role) => (
+                                            <option
+                                                key={role.role_id}
+                                                value={String(role.role_id)}
+                                            >
+                                                {role.role_name}
+                                            </option>
+                                        ))}
+                                    </select>
+
+                                    {selectedRole && (
+                                        <p className="mt-2 text-xs text-gray-500">
+                                            Selected role: {selectedRole.role_name}
+                                        </p>
+                                    )}
+                                </div>
+
+                                <div className="grid gap-4 sm:grid-cols-2">
+                                    <div>
+                                        <label
+                                            htmlFor="companyPassword"
+                                            className={labelClass}
+                                        >
+                                            Password for This Company *
+                                        </label>
+                                        <input
+                                            id="companyPassword"
+                                            type="password"
+                                            name="companyPassword"
+                                            value={form.companyPassword}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            minLength={8}
+                                            autoComplete="new-password"
+                                            required
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label
+                                            htmlFor="confirmCompanyPassword"
+                                            className={labelClass}
+                                        >
+                                            Confirm Company Password *
+                                        </label>
+                                        <input
+                                            id="confirmCompanyPassword"
+                                            type="password"
+                                            name="confirmCompanyPassword"
+                                            value={form.confirmCompanyPassword}
+                                            onChange={updateField}
+                                            className={inputClass}
+                                            minLength={8}
+                                            autoComplete="new-password"
+                                            required
+                                        />
+                                    </div>
+                                </div>
+
+                                <p className="rounded-lg bg-blue-50 p-3 text-sm text-blue-800">
+                                    This password is intended for this company
+                                    only. The selected user keeps their
+                                    username and email. Their passwords for
+                                    other companies must remain unchanged.
+                                </p>
+                            </div>
+                        )}
+                    </section>
+
+                    <button
+                        type="submit"
+                        disabled={
+                            loading ||
+                            loadingOptions ||
+                            (form.assignmentMode === "existingUser" &&
+                                (
+                                    !form.existingUserId ||
+                                    !form.existingRoleId ||
+                                    !form.companyPassword ||
+                                    !form.confirmCompanyPassword
+                                ))
+                        }
+                        className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-3 font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                        {loading && (
+                            <LoaderCircle className="animate-spin" size={18} />
+                        )}
+
+                        {loading
+                            ? "Registering Company..."
+                            : "Register Company"}
+                    </button>
+
+                    <p className="text-center text-sm text-gray-600">
+                        <button
+                            type="button"
+                            onClick={() => setShowRegistrationForm(false)}
+                            className="font-semibold text-blue-600 hover:underline"
+                        >
+                            Return to company list
+                        </button>
+                    </p>
+                </form>
+            </div>
+        </main>
+    );
+}
+
+
+
+========== app\api\auth\login\route.js ==========
+
+
+import { NextResponse } from "next/server";
+import bcrypt from "bcryptjs";
+import pool from "@/lib/db";
+import { createToken } from "@/lib/auth";
+
+export const dynamic = "force-dynamic";
+
+export async function POST(request) {
+  try {
+    const body = await request.json();
+
+    const username =
+      typeof body.username === "string" ? body.username.trim() : "";
+    const password = body.password;
+    const companyId =
+      body.companyId === undefined ||
+      body.companyId === null ||
+      body.companyId === ""
+        ? null
+        : Number(body.companyId);
+
+    if (
+      !username ||
+      typeof password !== "string" ||
+      !password ||
+      (companyId !== null &&
+        (!Number.isSafeInteger(companyId) || companyId <= 0))
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Enter a valid username and password.",
+        },
+        { status: 400 }
+      );
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        u.user_id,
+        u.full_name,
+        u.username,
+        u.email,
+        u.is_active AS user_is_active,
+        uc.company_id,
+        uc.role_id,
+        uc.company_password_hash,
+        c.company_name,
+        c.is_active AS company_is_active,
+        r.role_name
+      FROM users u
+      JOIN user_companies uc
+        ON uc.user_id = u.user_id
+      JOIN companies c
+        ON c.company_id = uc.company_id
+      JOIN roles r
+        ON r.role_id = uc.role_id
+      WHERE LOWER(u.username) = LOWER($1)
+        AND ($2::integer IS NULL OR uc.company_id = $2)
+        AND (
+          r.company_id IS NULL
+          OR r.company_id = uc.company_id
+        )
+      ORDER BY uc.company_id
+      `,
+      [username, companyId]
+    );
+
+    const matchingUsers = [];
+
+    for (const user of result.rows) {
+      if (
+        !user.user_is_active ||
+        !user.company_is_active ||
+        !user.company_password_hash
+      ) {
+        continue;
+      }
+
+      const passwordMatches = await bcrypt.compare(
+        password,
+        user.company_password_hash
+      );
+
+      if (passwordMatches) {
+        matchingUsers.push(user);
+      }
+    }
+
+    if (matchingUsers.length === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Invalid username, password, or company access.",
+        },
+        { status: 401 }
+      );
+    }
+
+    if (companyId === null && matchingUsers.length > 1) {
+      return NextResponse.json(
+        {
+          success: false,
+          code: "COMPANY_SELECTION_REQUIRED",
+          message: "Select the company you want to access.",
+          companies: matchingUsers.map((user) => ({
+            company_id: user.company_id,
+            company_name: user.company_name,
+          })),
+        },
+        { status: 409 }
+      );
+    }
+
+    const user = matchingUsers[0];
+
+    await pool.query(
+      `
+      UPDATE users
+      SET last_login = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = $1
+      `,
+      [user.user_id]
+    );
+
+    // const token = await createToken({
+    //   user_id: user.user_id,
+    //   username: user.username,
+    //   role_id: user.role_id,
+    //   role_name: user.role_name,
+    //   company_id: user.company_id,
+    // });
+
+    const token = await createToken({
+  userId: user.user_id,
+  username: user.username,
+  roleId: user.role_id,
+  roleName: user.role_name,
+  companyId: user.company_id,
+});
+
+    const response = NextResponse.json({
+      success: true,
+      message: "Login successful.",
+      user: {
+        userId: user.user_id,
+        fullName: user.full_name,
+        username: user.username,
+        roleName: user.role_name,
+        companyId: user.company_id,
+        companyName: user.company_name,
+      },
+    });
+
+    response.cookies.set("erp_token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 60 * 60 * 24,
+      path: "/",
+    });
+
+    return response;
+  } catch (error) {
+    console.error("Login error:", error);
+
+    return NextResponse.json(
+      {
+        success: false,
+        message: "Server error during login.",
+      },
+      { status: 500 }
+    );
+  }
+}
+
+
+
+========== app\api\companies\register\route.js ==========
+
+import { NextResponse } from "next/server";
+import bcrypt from "bcryptjs";
+import pool from "@/lib/db";
+import { getCurrentUser } from "@/lib/auth";
+import { hasPermission } from "@/lib/permissions";
+import {
+    mkdir,
+    writeFile,
+    unlink,
+} from "node:fs/promises";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+
+export const runtime = "nodejs";
+
+function jsonError(message, status = 400, error = null) {
+    const response = { success: false, message };
+
+    if (process.env.NODE_ENV === "development" && error) {
+        response.error = error.message || String(error);
+        response.code = error.code || null;
+        response.detail = error.detail || null;
+        response.constraint = error.constraint || null;
+        response.stack = error.stack || null;
+    }
+
+    return NextResponse.json(response, { status });
+}
+
+function getFormString(formData, key, fallback = "") {
+    const value = formData.get(key);
+    return typeof value === "string" ? value.trim() : fallback;
+}
+
+function validEmail(value) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function parsePositiveId(value) {
+    const id = Number(value);
+    return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+async function saveCompanyLogo(file) {
+    if (!file || typeof file.arrayBuffer !== "function" || file.size === 0) {
+        return null;
+    }
+
+    const allowedTypes = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+    };
+
+    if (!allowedTypes[file.type]) {
+        const error = new Error("Choose a PNG, JPG, or WebP company logo.");
+        error.status = 400;
+        throw error;
+    }
+
+    if (file.size > 2 * 1024 * 1024) {
+        const error = new Error("Company logo must be 2 MB or smaller.");
+        error.status = 400;
+        throw error;
+    }
+
+    const uploadDirectory = path.join(
+        process.cwd(),
+        "public",
+        "uploads",
+        "companies"
+    );
+
+    await mkdir(uploadDirectory, { recursive: true });
+
+    const fileName = `${randomUUID()}${allowedTypes[file.type]}`;
+    const filePath = path.join(uploadDirectory, fileName);
+
+    try {
+        await writeFile(
+            filePath,
+            Buffer.from(await file.arrayBuffer()),
+            { flag: "wx" }
+        );
+
+        return {
+            url: `/uploads/companies/${fileName}`,
+            filePath,
+        };
+    } catch (error) {
+        await unlink(filePath).catch(() => {});
+        throw error;
+    }
+}
+
+async function getCreatorAccess(userId) {
+    const result = await pool.query(
+        `
+        SELECT uc.company_id, uc.role_id, r.role_name
+        FROM user_companies uc
+        INNER JOIN companies c ON c.company_id = uc.company_id
+        INNER JOIN roles r ON r.role_id = uc.role_id
+        WHERE uc.user_id = $1 AND c.is_active = TRUE
+        ORDER BY uc.company_id;
+        `,
+        [userId]
+    );
+
+    const memberships = result.rows;
+
+    if (!memberships.length) {
+        return {
+            memberships: [],
+            allowed: false,
+            isAdmin: false,
+            creatorRoleName: null,
+        };
+    }
+
+    let allowedMembership = null;
+    let isAdmin = false;
+
+    for (const membership of memberships) {
+        const roleName = String(membership.role_name || "").toUpperCase();
+
+        if (roleName === "ADMIN") {
+            allowedMembership = membership;
+            isAdmin = true;
+            break;
+        }
+
+        const permitted = await hasPermission(
+            membership.role_id,
+            "companies",
+            "create"
+        );
+
+        if (permitted && !allowedMembership) {
+            allowedMembership = membership;
+        }
+    }
+
+    return {
+        memberships,
+        allowed: Boolean(allowedMembership),
+        isAdmin,
+        creatorRoleName: allowedMembership?.role_name || null,
+    };
+}
+
+async function getGlobalSystemRoles() {
+    const result = await pool.query(
+        `
+        SELECT role_id, role_name
+        FROM roles
+        WHERE is_system_role = TRUE AND company_id IS NULL
+        ORDER BY
+            CASE UPPER(role_name)
+                WHEN 'USER' THEN 1
+                WHEN 'SUB_ADMIN' THEN 2
+                WHEN 'ADMIN' THEN 3
+                ELSE 4
+            END,
+            role_name;
+        `
+    );
+
+    return result.rows;
+}
+
+
+export async function GET() {
+    try {
+        const currentUser = await getCurrentUser();
+
+        // Allow the registration page to load without exposing
+        // existing company users or roles to unauthenticated visitors.
+        if (!currentUser?.userId) {
+            return NextResponse.json({
+                success: true,
+                users: [],
+                roles: [],
+                requiresLogin: true,
+            });
+        }
+
+        const userId = parsePositiveId(currentUser.userId);
+
+        if (!userId) {
+            return jsonError("Invalid logged-in user.", 401);
+        }
+
+        const access = await getCreatorAccess(userId);
+
+        if (!access.allowed) {
+            return NextResponse.json({
+                success: true,
+                users: [],
+                roles: [],
+                requiresLogin: true,
+            });
+        }
+
+        const companyIds = access.memberships.map(
+            (membership) => membership.company_id
+        );
+
+        const usersResult = companyIds.length
+            ? await pool.query(
+                `
+                SELECT DISTINCT
+                    u.user_id,
+                    u.full_name,
+                    u.username,
+                    u.email
+                FROM users u
+                INNER JOIN user_companies uc
+                    ON uc.user_id = u.user_id
+                WHERE uc.company_id = ANY($1::int[])
+                  AND u.is_active = TRUE
+                ORDER BY u.full_name, u.username;
+                `,
+                [companyIds]
+            )
+            : { rows: [] };
+
+        const allRoles = await getGlobalSystemRoles();
+
+        const roles = access.isAdmin
+            ? allRoles
+            : allRoles.filter(
+                (role) =>
+                    String(role.role_name).toUpperCase() === "USER"
+            );
+
+        return NextResponse.json({
+            success: true,
+            users: usersResult.rows,
+            roles,
+            requiresLogin: false,
+        });
+    } catch (error) {
+        console.error("COMPANY REGISTRATION OPTIONS ERROR:", error);
+
+        return jsonError(
+            "Unable to load company registration options.",
+            500,
+            error
+        );
+    }
+}
+
+export async function POST(request) {
+    let currentUser;
+
+    try {
+        currentUser = await getCurrentUser();
+    } catch (error) {
+        console.error("COMPANY AUTHENTICATION ERROR:", error);
+        return jsonError("Unable to verify your login session.", 500, error);
+    }
+
+    if (!currentUser?.userId) {
+        return jsonError("Please log in to register a company.", 401);
+    }
+
+    const userId = parsePositiveId(currentUser.userId);
+
+    if (!userId) {
+        return jsonError("Invalid logged-in user.", 401);
+    }
+
+    // This endpoint accepts multipart/form-data, including an optional logo.
+    let formData;
+
+    try {
+        formData = await request.formData();
+    } catch (error) {
+        console.error("COMPANY FORM DATA ERROR:", error);
+
+        return jsonError(
+            "Unable to read company registration form data.",
+            400,
+            error
+        );
+    }
+
+    const companyName = getFormString(formData, "companyName");
+    const phone = getFormString(formData, "phone");
+    const companyEmail = getFormString(formData, "companyEmail").toLowerCase();
+    const address = getFormString(formData, "address");
+    const city = getFormString(formData, "city");
+    const province = getFormString(formData, "province");
+    const country = getFormString(formData, "country", "Pakistan");
+    const postalCode = getFormString(formData, "postalCode");
+    const currency = getFormString(formData, "currency", "PKR").toUpperCase();
+    const assignmentMode = getFormString(formData, "assignmentMode", "newAdmin");
+    const logoFile = formData.get("companyLogo");
+
+    const location = [city, province, country, postalCode]
+        .filter(Boolean)
+        .join(", ");
+
+    if (!companyName) {
+        return jsonError("Company name is required.");
+    }
+
+    if (companyName.length > 150) {
+        return jsonError("Company name cannot exceed 150 characters.");
+    }
+
+    if (
+        phone.length > 50 ||
+        address.length > 500 ||
+        city.length > 100 ||
+        province.length > 100 ||
+        country.length > 100 ||
+        postalCode.length > 30
+    ) {
+        return jsonError("One or more company details exceed the allowed length.");
+    }
+
+    if (companyEmail && !validEmail(companyEmail)) {
+        return jsonError("Enter a valid company email address.");
+    }
+
+    if (!/^[A-Z]{3}$/.test(currency)) {
+        return jsonError("Currency must be a three-letter code, such as PKR or USD.");
+    }
+
+    if (!["newAdmin", "existingUser"].includes(assignmentMode)) {
+        return jsonError("Select a valid company access option.");
+    }
+
+    let fullName = "";
+    let username = "";
+    let adminEmail = "";
+    let password = "";
+    let confirmPassword = "";
+    let existingUserId = null;
+    let existingRoleId = null;
+
+    if (assignmentMode === "newAdmin") {
+        fullName = getFormString(formData, "fullName");
+        username = getFormString(formData, "username");
+        adminEmail = getFormString(formData, "adminEmail").toLowerCase();
+
+        const passwordValue = formData.get("password");
+        const confirmPasswordValue = formData.get("confirmPassword");
+
+        password = typeof passwordValue === "string" ? passwordValue : "";
+        confirmPassword =
+            typeof confirmPasswordValue === "string" ? confirmPasswordValue : "";
+
+        if (
+            !fullName ||
+            !username ||
+            !adminEmail ||
+            !password ||
+            !confirmPassword
+        ) {
+            return jsonError("Complete all required administrator fields.");
+        }
+
+        if (fullName.length > 150 || username.length > 100) {
+            return jsonError(
+                "Administrator name or username exceeds the allowed length."
+            );
+        }
+
+        if (!/^[a-zA-Z0-9_.-]{3,100}$/.test(username)) {
+            return jsonError(
+                "Username must be 3–100 characters and contain only letters, numbers, dots, underscores, or hyphens."
+            );
+        }
+
+        if (!validEmail(adminEmail)) {
+            return jsonError("Enter a valid administrator email.");
+        }
+
+        if (password.length < 8) {
+            return jsonError("Password must be at least 8 characters long.");
+        }
+
+        if (password !== confirmPassword) {
+            return jsonError("Passwords do not match.");
+        }
+    } else {
+        existingUserId = parsePositiveId(
+            getFormString(formData, "existingUserId")
+        );
+
+        existingRoleId = parsePositiveId(
+            getFormString(formData, "existingRoleId")
+        );
+
+        if (!existingUserId || !existingRoleId) {
+            return jsonError("Select an existing user and a valid role.");
+        }
+    }
+
+    let access;
+
+    try {
+        access = await getCreatorAccess(userId);
+    } catch (error) {
+        console.error("COMPANY ACCESS CHECK ERROR:", error);
+
+        return jsonError(
+            "Unable to verify your company permissions.",
+            500,
+            error
+        );
+    }
+
+    if (!access.allowed) {
+        return jsonError(
+            "You do not have permission to register a company.",
+            403
+        );
+    }
+
+    let client;
+    let transactionStarted = false;
+    let savedLogo = null;
+
+    try {
+        client = await pool.connect();
+
+        await client.query("BEGIN");
+        transactionStarted = true;
+
+        const creatorRoleResult = await client.query(
+            `
+            SELECT role_id
+            FROM roles
+            WHERE company_id IS NULL
+              AND is_system_role = TRUE
+              AND UPPER(role_name) = UPPER($1)
+            LIMIT 1;
+            `,
+            [access.creatorRoleName]
+        );
+
+        let creatorRoleId = creatorRoleResult.rows[0]?.role_id;
+
+        if (!creatorRoleId) {
+            const userRoleResult = await client.query(
+                `
+                SELECT role_id
+                FROM roles
+                WHERE company_id IS NULL
+                  AND is_system_role = TRUE
+                  AND UPPER(role_name) = 'USER'
+                LIMIT 1;
+                `
+            );
+
+            if (!userRoleResult.rows.length) {
+                throw new Error("The global USER system role was not found.");
+            }
+
+            creatorRoleId = userRoleResult.rows[0].role_id;
+        }
+
+        let adminRoleId = null;
+
+        if (assignmentMode === "newAdmin") {
+            const duplicate = await client.query(
+                `
+                SELECT user_id
+                FROM users
+                WHERE LOWER(username) = LOWER($1)
+                   OR LOWER(email) = LOWER($2)
+                LIMIT 1;
+                `,
+                [username, adminEmail]
+            );
+
+            if (duplicate.rows.length) {
+                await client.query("ROLLBACK");
+                transactionStarted = false;
+
+                return jsonError(
+                    "That username or administrator email is already registered. Use different login details.",
+                    409
+                );
+            }
+
+            const adminRoleResult = await client.query(
+                `
+                SELECT role_id
+                FROM roles
+                WHERE UPPER(role_name) = 'ADMIN'
+                  AND is_system_role = TRUE
+                  AND company_id IS NULL
+                LIMIT 1;
+                `
+            );
+
+            if (!adminRoleResult.rows.length) {
+                throw new Error("The global ADMIN system role was not found.");
+            }
+
+            adminRoleId = adminRoleResult.rows[0].role_id;
+        } else {
+            const selectedUserResult = await client.query(
+                `
+                SELECT user_id, is_active
+                FROM users
+                WHERE user_id = $1
+                FOR UPDATE;
+                `,
+                [existingUserId]
+            );
+
+            if (!selectedUserResult.rows.length) {
+                await client.query("ROLLBACK");
+                transactionStarted = false;
+                return jsonError("The selected user does not exist.", 404);
+            }
+
+            if (!selectedUserResult.rows[0].is_active) {
+                await client.query("ROLLBACK");
+                transactionStarted = false;
+                return jsonError("You cannot assign an inactive user.");
+            }
+
+            const sharedCompany = await client.query(
+                `
+                SELECT 1
+                FROM user_companies target_membership
+                INNER JOIN user_companies creator_membership
+                    ON creator_membership.company_id = target_membership.company_id
+                INNER JOIN companies c
+                    ON c.company_id = creator_membership.company_id
+                WHERE target_membership.user_id = $1
+                  AND creator_membership.user_id = $2
+                  AND c.is_active = TRUE
+                LIMIT 1;
+                `,
+                [existingUserId, userId]
+            );
+
+            if (!sharedCompany.rows.length) {
+                await client.query("ROLLBACK");
+                transactionStarted = false;
+
+                return jsonError(
+                    "You can assign only users who share at least one of your existing companies.",
+                    403
+                );
+            }
+
+            const selectedRoleResult = await client.query(
+                `
+                SELECT role_id, role_name
+                FROM roles
+                WHERE role_id = $1
+                  AND company_id IS NULL
+                  AND is_system_role = TRUE
+                LIMIT 1;
+                `,
+                [existingRoleId]
+            );
+
+            if (!selectedRoleResult.rows.length) {
+                await client.query("ROLLBACK");
+                transactionStarted = false;
+
+                return jsonError(
+                    "The selected role is not an assignable global system role."
+                );
+            }
+
+            const selectedRoleName = String(
+                selectedRoleResult.rows[0].role_name
+            ).toUpperCase();
+
+            if (!access.isAdmin && selectedRoleName !== "USER") {
+                await client.query("ROLLBACK");
+                transactionStarted = false;
+
+                return jsonError(
+                    "Only an existing ADMIN can assign ADMIN or SUB_ADMIN roles.",
+                    403
+                );
+            }
+
+            existingRoleId = selectedRoleResult.rows[0].role_id;
+        }
+
+        savedLogo = await saveCompanyLogo(logoFile);
+
+        const companyResult = await client.query(
+            `
+            INSERT INTO companies (
+                company_name,
+                phone,
+                email,
+                address,
+                location,
+                logo_url,
+                currency,
+                is_active,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            RETURNING
+                company_id,
+                company_name,
+                phone,
+                email,
+                address,
+                location,
+                logo_url,
+                currency;
+            `,
+            [
+                companyName,
+                phone || null,
+                companyEmail || null,
+                address || null,
+                location || null,
+                savedLogo?.url || null,
+                currency,
+            ]
+        );
+
+        const company = companyResult.rows[0];
+
+        const creatorMembershipRoleId =
+            assignmentMode === "existingUser" && existingUserId === userId
+                ? existingRoleId
+                : creatorRoleId;
+
+        await client.query(
+            `
+            INSERT INTO user_companies (user_id, company_id, role_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, company_id)
+            DO UPDATE SET role_id = EXCLUDED.role_id;
+            `,
+            [userId, company.company_id, creatorMembershipRoleId]
+        );
+
+        let assignedUser;
+
+        if (assignmentMode === "newAdmin") {
+            const passwordHash = await bcrypt.hash(password, 12);
+
+            const adminResult = await client.query(
+                `
+                INSERT INTO users (
+                    full_name,
+                    username,
+                    email,
+                    password_hash,
+                    role_id,
+                    company_id,
+                    is_active,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6,
+                    TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                RETURNING
+                    user_id,
+                    full_name,
+                    username,
+                    email,
+                    company_id,
+                    role_id;
+                `,
+                [
+                    fullName,
+                    username,
+                    adminEmail,
+                    passwordHash,
+                    adminRoleId,
+                    company.company_id,
+                ]
+            );
+
+            assignedUser = adminResult.rows[0];
+
+            await client.query(
+                `
+                INSERT INTO user_companies (user_id, company_id, role_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id, company_id)
+                DO UPDATE SET role_id = EXCLUDED.role_id;
+                `,
+                [assignedUser.user_id, company.company_id, adminRoleId]
+            );
+        } else {
+            await client.query(
+                `
+                INSERT INTO user_companies (user_id, company_id, role_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id, company_id)
+                DO UPDATE SET role_id = EXCLUDED.role_id;
+                `,
+                [existingUserId, company.company_id, existingRoleId]
+            );
+
+            const assignedResult = await client.query(
+                `
+                SELECT user_id, full_name, username, email
+                FROM users
+                WHERE user_id = $1;
+                `,
+                [existingUserId]
+            );
+
+            assignedUser = assignedResult.rows[0];
+        }
+
+        await client.query("COMMIT");
+        transactionStarted = false;
+
+        return NextResponse.json(
+            {
+                success: true,
+                message:
+                    assignmentMode === "newAdmin"
+                        ? "Company created successfully. The new administrator can log in with their new account."
+                        : "Company created successfully. The existing user has been assigned without creating another login.",
+                company,
+                assignedUser,
+            },
+            { status: 201 }
+        );
+    } catch (error) {
+        console.error("COMPANY REGISTRATION ERROR:", {
+            message: error?.message,
+            code: error?.code,
+            detail: error?.detail,
+            constraint: error?.constraint,
+            stack: error?.stack,
+        });
+
+        if (client && transactionStarted) {
+            try {
+                await client.query("ROLLBACK");
+            } catch (rollbackError) {
+                console.error("COMPANY ROLLBACK ERROR:", rollbackError);
+            }
+
+            transactionStarted = false;
+        }
+
+        if (savedLogo?.filePath) {
+            try {
+                await unlink(savedLogo.filePath);
+            } catch (cleanupError) {
+                console.error("COMPANY LOGO CLEANUP ERROR:", cleanupError);
+            }
+        }
+
+        if (error?.status === 400) {
+            return jsonError(error.message, 400, error);
+        }
+
+        if (error?.code === "23505") {
+            return jsonError(
+                "A database record conflicts with an existing record.",
+                409,
+                error
+            );
+        }
+
+        return jsonError(
+            "Company registration failed.",
+            500,
+            error
+        );
+    } finally {
+        client?.release();
+    }
+}
+
+
+
+========== app\api\settings\list\route.js ==========
+
+
+import { NextResponse } from "next/server";
+import pool from "@/lib/db";
+import { getCurrentUser } from "@/lib/auth";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+export async function GET() {
+    try {
+        // Require a logged-in user for this dashboard API.
+        const currentUser = await getCurrentUser();
+
+        if (!currentUser) {
+            return NextResponse.json(
+                { success: false, message: "Please log in to view companies." },
+                { status: 401 }
+            );
+        }
+
+        const result = await pool.query(`
+            SELECT
+                company_id,
+                company_name,
+                location,
+                logo_url,
+                address,
+                phone,
+                email,
+                currency
+            FROM companies
+            WHERE is_active = TRUE
+            ORDER BY company_name ASC;
+        `);
+
+        return NextResponse.json({
+            success: true,
+            companies: result.rows,
+        });
+    } catch (error) {
+        console.error("SETTINGS COMPANY LIST ERROR:", error);
+
+        return NextResponse.json(
+            {
+                success: false,
+                message: "Unable to load the company list.",
+            },
+            { status: 500 }
+        );
+    }
+}
+

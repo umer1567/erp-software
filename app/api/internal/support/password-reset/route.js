@@ -1,0 +1,283 @@
+import { NextResponse } from "next/server";
+import {
+  randomBytes,
+  createHash,
+  timingSafeEqual,
+} from "crypto";
+import pool from "@/lib/db";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+function jsonResponse(data, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "Cache-Control": "no-store",
+      Pragma: "no-cache",
+    },
+  });
+}
+
+function secretsMatch(expected, supplied) {
+  if (
+    typeof expected !== "string" ||
+    typeof supplied !== "string" ||
+    !expected ||
+    !supplied
+  ) {
+    return false;
+  }
+
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  const suppliedBuffer = Buffer.from(supplied, "utf8");
+
+  return (
+    expectedBuffer.length === suppliedBuffer.length &&
+    timingSafeEqual(expectedBuffer, suppliedBuffer)
+  );
+}
+
+function getConfiguredAppUrl() {
+  const configuredUrl = process.env.CLIENT_APP_URL;
+
+  if (!configuredUrl) {
+    throw new Error("CLIENT_APP_URL is not configured.");
+  }
+
+  const appUrl = new URL(configuredUrl);
+
+  if (
+    !["http:", "https:"].includes(appUrl.protocol) ||
+    appUrl.username ||
+    appUrl.password ||
+    appUrl.search ||
+    appUrl.hash
+  ) {
+    throw new Error("CLIENT_APP_URL is invalid.");
+  }
+
+  if (
+    process.env.NODE_ENV === "production" &&
+    appUrl.protocol !== "https:"
+  ) {
+    throw new Error(
+      "Production reset links must use HTTPS."
+    );
+  }
+
+  // Preserve any configured application base path.
+  appUrl.pathname = `${appUrl.pathname.replace(/\/+$/, "")}/`;
+
+  return appUrl;
+}
+
+export async function POST(request) {
+  // Authenticate the Super Admin server-to-server request.
+  const expectedSecret = process.env.CLIENT_DATA_API_SECRET;
+  const suppliedSecret = request.headers.get(
+    "x-client-data-secret"
+  );
+
+  if (!secretsMatch(expectedSecret, suppliedSecret)) {
+    return jsonResponse(
+      {
+        success: false,
+        message: "Unauthorized.",
+      },
+      401
+    );
+  }
+
+  let db;
+  let transactionStarted = false;
+
+  try {
+    let body;
+
+    try {
+      body = await request.json();
+    } catch {
+      return jsonResponse(
+        {
+          success: false,
+          message: "A valid JSON request body is required.",
+        },
+        400
+      );
+    }
+
+    const userId = Number(body?.userId);
+    const companyId = Number(body?.companyId);
+
+    if (
+      !Number.isSafeInteger(userId) ||
+      userId < 1 ||
+      !Number.isSafeInteger(companyId) ||
+      companyId < 1
+    ) {
+      return jsonResponse(
+        {
+          success: false,
+          message: "A valid user and company are required.",
+        },
+        400
+      );
+    }
+
+    let appUrl;
+
+    try {
+      appUrl = getConfiguredAppUrl();
+    } catch (error) {
+      console.error("Password reset URL configuration error:", {
+        message: error.message,
+      });
+
+      return jsonResponse(
+        {
+          success: false,
+          message:
+            "Client application URL is missing or invalid. Check CLIENT_APP_URL in .env.local.",
+        },
+        500
+      );
+    }
+
+    // Confirm that the user belongs to this active company.
+    // The current database uses integer IDs for these tables.
+    const accountResult = await pool.query(
+      `SELECT
+         u.user_id,
+         u.username,
+         u.full_name,
+         uc.company_id
+       FROM users AS u
+       INNER JOIN user_companies AS uc
+         ON uc.user_id = u.user_id
+       INNER JOIN companies AS c
+         ON c.company_id = uc.company_id
+       WHERE u.user_id = $1
+         AND uc.company_id = $2
+         AND u.is_active = TRUE
+         AND c.is_active = TRUE
+       LIMIT 1`,
+      [userId, companyId]
+    );
+
+    if (accountResult.rowCount === 0) {
+      return jsonResponse(
+        {
+          success: false,
+          message:
+            "The user does not belong to this active company.",
+        },
+        404
+      );
+    }
+
+    // Generate a cryptographically secure, single-use token.
+    // Never store the original token in PostgreSQL.
+    const rawToken = randomBytes(32).toString("hex");
+
+    const tokenHash = createHash("sha256")
+      .update(rawToken, "utf8")
+      .digest("hex");
+
+    db = await pool.connect();
+
+    await db.query("BEGIN");
+    transactionStarted = true;
+
+    // Serialize token creation for this user/company pair.
+    // PostgreSQL advisory locks accept two signed 32-bit integer keys.
+    await db.query(
+      `SELECT pg_advisory_xact_lock($1::integer, $2::integer)`,
+      [userId, companyId]
+    );
+
+    // Invalidate existing unused tokens for this user/company.
+    await db.query(
+      `UPDATE password_reset_tokens
+       SET used_at = NOW()
+       WHERE user_id = $1
+         AND company_id = $2
+         AND used_at IS NULL`,
+      [userId, companyId]
+    );
+
+    // Insert the new token with a 30-minute expiry.
+    // reset_id is assumed to be generated by the database.
+    await db.query(
+      `INSERT INTO password_reset_tokens (
+         user_id,
+         company_id,
+         token_hash,
+         expires_at,
+         created_at,
+         used_at
+       )
+       VALUES (
+         $1,
+         $2,
+         $3,
+         NOW() + INTERVAL '30 minutes',
+         NOW(),
+         NULL
+       )`,
+      [userId, companyId, tokenHash]
+    );
+
+    await db.query("COMMIT");
+    transactionStarted = false;
+
+    // Build the link after the database transaction succeeds.
+    const resetPageUrl = new URL("reset-password", appUrl);
+    resetPageUrl.searchParams.set("token", rawToken);
+
+    return jsonResponse({
+      success: true,
+      message: "Reset link generated.",
+      resetUrl: resetPageUrl.toString(),
+      expiresInMinutes: 30,
+    });
+  } catch (error) {
+    if (db && transactionStarted) {
+      try {
+        await db.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error("Password reset rollback failed:", {
+          message: rollbackError.message,
+          code: rollbackError.code,
+        });
+      }
+
+      transactionStarted = false;
+    }
+
+    // Diagnostic details go to the server terminal only.
+    // Never expose database internals or the token to the caller.
+    console.error(
+      "Internal password reset generation failed:",
+      {
+        message: error.message,
+        code: error.code,
+        detail: error.detail,
+        constraint: error.constraint,
+        table: error.table,
+        column: error.column,
+        where: error.where,
+      }
+    );
+
+    return jsonResponse(
+      {
+        success: false,
+        message: "Unable to generate the reset link.",
+      },
+      500
+    );
+  } finally {
+    db?.release();
+  }
+}
