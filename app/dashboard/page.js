@@ -1,4 +1,4 @@
-
+export const dynamic = "force-dynamic";
 import { getCurrentUser } from "@/lib/auth";
 import { hasPermission } from "@/lib/permissions";
 import DashboardAnalytics from "./DashboardAnalytics";
