@@ -75,19 +75,12 @@ const DEFAULT_CUSTOMER_COLUMNS = Object.fromEntries(
 
 /* =========================================================
    CUSTOMER COLUMN VISIBILITY STORE
-
-   - Uses useSyncExternalStore.
-   - Saves preferences in localStorage.
-   - Supports browser tabs.
-   - Always keeps at least one column visible.
-   - Does not use setState inside useEffect.
 ========================================================= */
 
 const customerColumnListeners = new Set();
 
 function subscribeCustomerColumns(callback) {
   customerColumnListeners.add(callback);
-
   window.addEventListener("storage", callback);
 
   return () => {
@@ -150,12 +143,11 @@ function parseCustomerColumns(raw) {
     ])
   );
 
-  // Safety: never allow zero visible columns.
-  const hasVisibleColumn = CUSTOMER_COLUMNS.some(
-    ({ key }) => visible[key] !== false
-  );
-
-  if (!hasVisibleColumn) {
+  if (
+    !CUSTOMER_COLUMNS.some(
+      ({ key }) => visible[key] !== false
+    )
+  ) {
     visible[CUSTOMER_COLUMNS[0].key] = true;
   }
 
@@ -181,7 +173,6 @@ function useCustomerColumnVisibility() {
 
     if (!validColumn) return;
 
-    // Read the latest saved preferences, not a stale render.
     const current = parseCustomerColumns(
       getCustomerColumnsSnapshot()
     );
@@ -190,7 +181,6 @@ function useCustomerColumnVisibility() {
       (column) => current[column.key] !== false
     ).length;
 
-    // Do not hide the final visible column.
     if (current[key] !== false && visibleCount <= 1) {
       return;
     }
@@ -277,10 +267,10 @@ function normalizePermission(data) {
     data?.permission ||
     (Array.isArray(data?.permissions)
       ? data.permissions.find(
-          (item) =>
-            item.permission_key === PERMISSION_KEY ||
-            item.permissionKey === PERMISSION_KEY
-        )
+        (item) =>
+          item.permission_key === PERMISSION_KEY ||
+          item.permissionKey === PERMISSION_KEY
+      )
       : null) ||
     data;
 
@@ -303,13 +293,10 @@ function normalizePermission(data) {
   return {
     canView:
       (permission.can_view ?? permission.canView) === true,
-
     canCreate:
       (permission.can_create ?? permission.canCreate) === true,
-
     canUpdate:
       (permission.can_update ?? permission.canUpdate) === true,
-
     canDelete:
       (permission.can_delete ?? permission.canDelete) === true,
   };
@@ -322,129 +309,114 @@ function normalizePermission(data) {
 function ColumnVisibilityMenu({
   columns,
   visible,
+  visibleCount,
   onToggle,
   onReset,
-  visibleCount,
 }) {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
 
-    function handleEscape(event) {
+    const handleKeyDown = (event) => {
       if (event.key === "Escape") {
         setOpen(false);
       }
-    }
+    };
 
-    document.addEventListener("keydown", handleEscape);
+    window.addEventListener("keydown", handleKeyDown);
 
     return () => {
-      document.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("keydown", handleKeyDown);
     };
   }, [open]);
 
   return (
-    <div className="relative">
+    <div className="relative z-50">
       <button
         type="button"
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => setOpen((previous) => !previous)}
         aria-expanded={open}
-        aria-haspopup="true"
-        className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-blue-800 dark:hover:bg-blue-950/40 dark:hover:text-blue-300"
+        aria-label="Choose visible columns"
+        className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
       >
         <Columns3 className="h-4 w-4" />
-
         Columns
 
-        <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-xs tabular-nums dark:bg-slate-800">
-          {visibleCount}/{columns.length}
-        </span>
-
         <ChevronDown
-          className={`h-4 w-4 transition-transform ${
-            open ? "rotate-180" : ""
-          }`}
+          className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""
+            }`}
         />
       </button>
 
       {open && (
         <>
+          {/* Click outside to close */}
           <button
             type="button"
             aria-label="Close column menu"
-            className="fixed inset-0 z-30 cursor-default"
             onClick={() => setOpen(false)}
+            className="fixed inset-0 z-[90] cursor-default"
           />
 
-          <div
-            role="group"
-            aria-label="Choose visible customer columns"
-            className="absolute right-0 z-40 mt-2 max-h-80 w-64 overflow-y-auto overscroll-contain rounded-2xl border border-slate-200 bg-white p-3 shadow-xl [scrollbar-width:thin] dark:border-slate-700 dark:bg-slate-900"
-          >
-            <div className="mb-2 flex items-center justify-between gap-3 border-b border-slate-100 pb-3 dark:border-slate-800">
+          <div className="absolute right-0 top-full z-[100] mt-2 w-72 max-w-[calc(100vw-2rem)] rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl ring-1 ring-black/5 dark:border-slate-700 dark:bg-slate-900">
+            {/* HEADER */}
+            <div className="mb-2 flex items-center justify-between gap-2 border-b border-slate-100 pb-3 dark:border-slate-800">
               <div>
-                <p className="text-sm font-bold text-slate-900 dark:text-white">
-                  Visible columns
+                <p className="text-sm font-bold text-slate-800 dark:text-white">
+                  Table Columns
                 </p>
 
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                  Choose what appears in the table
+                  {visibleCount} of {columns.length} visible
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={onReset}
-                className="shrink-0 text-xs font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400"
-              >
-                Reset
-              </button>
+              {onReset && (
+                <button
+                  type="button"
+                  onClick={onReset}
+                  className="shrink-0 rounded-lg px-2 py-1.5 text-xs font-semibold text-blue-600 transition hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-500/10"
+                >
+                  Show All
+                </button>
+              )}
             </div>
 
-            <div className="mb-2 rounded-lg bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 dark:bg-blue-950/40 dark:text-blue-300">
-              {visibleCount} of {columns.length} columns visible
-            </div>
-
-            <div className="space-y-1">
+            {/* COLUMN OPTIONS */}
+            <div className="max-h-64 space-y-1 overflow-y-auto overscroll-contain pr-1">
               {columns.map((column) => {
-                const isVisible = visible[column.key] !== false;
-
-                // If this is the last visible column, it cannot be hidden.
-                const isLastVisible =
-                  isVisible && visibleCount === 1;
+                const checked = visible[column.key] !== false;
+                const isLastVisible = checked && visibleCount === 1;
 
                 return (
                   <label
                     key={column.key}
-                    title={
-                      isLastVisible
-                        ? "At least one column must remain visible."
-                        : ""
-                    }
-                    className={`flex items-center gap-3 rounded-xl px-2.5 py-2.5 text-sm transition ${
-                      isLastVisible
-                        ? "cursor-not-allowed opacity-70"
+                    aria-disabled={isLastVisible}
+                    title={isLastVisible ? "At least one column must stay visible" : undefined}
+                    className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${isLastVisible
+                        ? "cursor-default bg-blue-50 hover:bg-blue-100 dark:bg-blue-500/10 dark:hover:bg-blue-500/20"
                         : "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800"
-                    } text-slate-700 dark:text-slate-300`}
+                      }`}
                   >
                     <input
                       type="checkbox"
-                      checked={isVisible}
-                      disabled={isLastVisible}
-                      onChange={() => onToggle(column.key)}
-                      className="h-4 w-4 rounded border-slate-300 accent-blue-600 focus:ring-blue-500 disabled:cursor-not-allowed dark:border-slate-600"
+                      checked={checked}
+                      onChange={() => {
+                        // The last visible column can't be hidden
+                        if (!isLastVisible) onToggle(column.key);
+                      }}
+                      className="h-4 w-4 cursor-pointer accent-blue-600"
                     />
 
-                    <span className="font-medium">
+                    <span
+                      className={`font-medium ${isLastVisible
+                          ? "text-blue-700 dark:text-blue-400"
+                          : "text-slate-700 dark:text-slate-200"
+                        }`}
+                    >
                       {column.label}
                     </span>
-
-                    {isLastVisible && (
-                      <span className="ml-auto text-[10px] font-semibold text-blue-600 dark:text-blue-400">
-                        Required
-                      </span>
-                    )}
                   </label>
                 );
               })}
@@ -585,7 +557,7 @@ function AccessDenied({ message, loading, onRetry }) {
           {loading
             ? "Checking your customer management permissions. Please wait."
             : message ||
-              "You do not have permission to view the Customers page. Contact your administrator if you need access."}
+            "You do not have permission to view the Customers page. Contact your administrator if you need access."}
         </p>
 
         {!loading && onRetry && (
@@ -627,7 +599,6 @@ export default function CustomersPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
 
-  // Column preferences: no effect-based state initialization.
   const {
     visible: visibleColumns,
     toggleColumn,
@@ -670,7 +641,6 @@ export default function CustomersPage() {
       setPermission(normalized);
     } catch (err) {
       setPermission(null);
-
       setPermissionError(
         err.message || "Unable to load customer permissions."
       );
@@ -680,18 +650,20 @@ export default function CustomersPage() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
+  let isMounted = true;
 
-    Promise.resolve().then(() => {
-      if (!cancelled) {
-        loadPermission();
-      }
-    });
+  const initializePermissions = async () => {
+    if (!isMounted) return;
 
-    return () => {
-      cancelled = true;
-    };
-  }, [loadPermission]);
+    await loadPermission();
+  };
+
+  initializePermissions();
+
+  return () => {
+    isMounted = false;
+  };
+}, [loadPermission]);
 
   /* =======================================================
      LOAD CUSTOMERS AFTER VIEW PERMISSION
@@ -1099,8 +1071,8 @@ export default function CustomersPage() {
   ======================================================= */
 
   return (
-    <main className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-      <div className="mx-auto max-w-[1700px] space-y-6 p-4 sm:p-6 lg:space-y-8 lg:p-8">
+    <main className="min-h-screen min-w-0 overflow-x-hidden bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+      <div className="mx-auto w-full max-w-[1700px] min-w-0 space-y-6 p-4 sm:p-6 lg:space-y-8 lg:p-8">
 
         {/* HEADER */}
 
@@ -1110,12 +1082,12 @@ export default function CustomersPage() {
           <div className="pointer-events-none absolute -bottom-32 right-1/3 h-64 w-64 rounded-full bg-cyan-300/20 blur-3xl" />
 
           <div className="relative flex flex-col justify-between gap-6 xl:flex-row xl:items-center">
-            <div className="flex items-start gap-4">
+            <div className="flex min-w-0 items-start gap-4">
               <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/20 bg-white/15 shadow-inner backdrop-blur-sm sm:h-16 sm:w-16">
                 <Users className="h-7 w-7 sm:h-8 sm:w-8" />
               </div>
 
-              <div>
+              <div className="min-w-0">
                 <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-medium text-blue-50">
                   <Sparkles className="h-3.5 w-3.5" />
                   Customer Relationship Management
@@ -1142,9 +1114,8 @@ export default function CustomersPage() {
                     className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/25 bg-white/10 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/20 disabled:opacity-60"
                   >
                     <RefreshCw
-                      className={`h-4 w-4 ${
-                        loading ? "animate-spin" : ""
-                      }`}
+                      className={`h-4 w-4 ${loading ? "animate-spin" : ""
+                        }`}
                     />
                     Refresh
                   </button>
@@ -1234,7 +1205,7 @@ export default function CustomersPage() {
           >
             <XCircle className="mt-0.5 h-5 w-5 shrink-0" />
 
-            <p className="flex-1">{error}</p>
+            <p className="flex-1 break-words">{error}</p>
 
             <button
               type="button"
@@ -1254,7 +1225,7 @@ export default function CustomersPage() {
           >
             <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" />
 
-            <p className="flex-1">{success}</p>
+            <p className="flex-1 break-words">{success}</p>
 
             <button
               type="button"
@@ -1577,11 +1548,11 @@ export default function CustomersPage() {
 
             {/* CUSTOMER DIRECTORY */}
 
-            <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
-              <div className="border-b border-slate-200 p-5 dark:border-slate-800 sm:p-6">
+            <section className="relative z-20 overflow-visible rounded-3xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+              <div className="relative z-30 border-b border-slate-200 p-5 dark:border-slate-800 sm:p-6">
                 <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-center">
                   <div className="flex items-center gap-3">
-                    <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-50 dark:bg-blue-950/50">
+                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-50 dark:bg-blue-950/50">
                       <Users className="h-5 w-5 text-blue-600 dark:text-blue-300" />
                     </div>
 
@@ -1601,14 +1572,6 @@ export default function CustomersPage() {
                       {filteredCustomers.length} of {customers.length} records
                     </span>
 
-                    <ColumnVisibilityMenu
-                      columns={CUSTOMER_COLUMNS}
-                      visible={visibleColumns}
-                      visibleCount={visibleColumnCount}
-                      onToggle={toggleColumn}
-                      onReset={resetColumns}
-                    />
-
                     <button
                       type="button"
                       onClick={loadCustomers}
@@ -1616,9 +1579,8 @@ export default function CustomersPage() {
                       className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
                     >
                       <RefreshCw
-                        className={`h-4 w-4 ${
-                          loading ? "animate-spin" : ""
-                        }`}
+                        className={`h-4 w-4 ${loading ? "animate-spin" : ""
+                          }`}
                       />
                       Refresh
                     </button>
@@ -1633,13 +1595,21 @@ export default function CustomersPage() {
                         Add Customer
                       </button>
                     )}
+
+                    <ColumnVisibilityMenu
+                      columns={CUSTOMER_COLUMNS}
+                      visible={visibleColumns}
+                      visibleCount={visibleColumnCount}
+                      onToggle={toggleColumn}
+                      onReset={resetColumns}
+                    />
                   </div>
                 </div>
 
                 {/* SEARCH AND FILTERS */}
 
                 <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_220px_auto]">
-                  <div className="relative">
+                  <div className="relative min-w-0">
                     <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
 
                     <input
@@ -1654,7 +1624,7 @@ export default function CustomersPage() {
                     />
                   </div>
 
-                  <div className="relative">
+                  <div className="relative min-w-0">
                     <select
                       value={statusFilter}
                       onChange={(event) =>
@@ -1744,51 +1714,86 @@ export default function CustomersPage() {
                 <>
                   {/* DESKTOP TABLE */}
 
-                  <div className="hidden overflow-x-auto md:block">
-                    <table className="w-full min-w-[700px] text-left text-sm">
+                  <div className="hidden w-full overflow-x-auto [scrollbar-width:thin] md:block">
+                    <table
+                      style={{ minWidth: `${visibleColumnCount * 160}px` }}
+                      className="w-full table-auto text-left text-sm"
+                    >
+                      <colgroup>
+                        {visibleColumns.customer && (
+                          <col style={{ width: "19%" }} />
+                        )}
+
+                        {visibleColumns.contact && (
+                          <col style={{ width: "19%" }} />
+                        )}
+
+                        {visibleColumns.sales && (
+                          <col style={{ width: "13%" }} />
+                        )}
+
+                        {visibleColumns.paid && (
+                          <col style={{ width: "13%" }} />
+                        )}
+
+                        {visibleColumns.balance && (
+                          <col style={{ width: "13%" }} />
+                        )}
+
+                        {visibleColumns.status && (
+                          <col style={{ width: "11%" }} />
+                        )}
+
+                        {visibleColumns.actions &&
+                          (canUpdate || canDelete) && (
+                            <col style={{ width: "12%" }} />
+                          )}
+                      </colgroup>
+
                       <thead className="bg-slate-50 dark:bg-slate-800/80">
                         <tr className="border-b border-slate-200 dark:border-slate-800">
                           {visibleColumns.customer && (
-                            <th className="px-5 py-4 font-semibold text-slate-500 dark:text-slate-300">
+                            <th className="break-words px-3 py-4 font-semibold text-slate-500 dark:text-slate-300">
                               Customer
                             </th>
                           )}
 
                           {visibleColumns.contact && (
-                            <th className="px-5 py-4 font-semibold text-slate-500 dark:text-slate-300">
+                            <th className="break-words px-3 py-4 font-semibold text-slate-500 dark:text-slate-300">
                               Contact Details
                             </th>
                           )}
 
                           {visibleColumns.sales && (
-                            <th className="px-5 py-4 text-right font-semibold text-slate-500 dark:text-slate-300">
+                            <th className="break-words px-3 py-4 text-right font-semibold text-slate-500 dark:text-slate-300">
                               Sales
                             </th>
                           )}
 
                           {visibleColumns.paid && (
-                            <th className="px-5 py-4 text-right font-semibold text-slate-500 dark:text-slate-300">
+                            <th className="break-words px-3 py-4 text-right font-semibold text-slate-500 dark:text-slate-300">
                               Paid
                             </th>
                           )}
 
                           {visibleColumns.balance && (
-                            <th className="px-5 py-4 text-right font-semibold text-slate-500 dark:text-slate-300">
+                            <th className="break-words px-3 py-4 text-right font-semibold text-slate-500 dark:text-slate-300">
                               Balance
                             </th>
                           )}
 
                           {visibleColumns.status && (
-                            <th className="px-5 py-4 font-semibold text-slate-500 dark:text-slate-300">
+                            <th className="break-words px-3 py-4 font-semibold text-slate-500 dark:text-slate-300">
                               Status
                             </th>
                           )}
 
-                          {visibleColumns.actions && (canUpdate || canDelete) && (
-                            <th className="px-5 py-4 text-right font-semibold text-slate-500 dark:text-slate-300">
-                              Actions
-                            </th>
-                          )}
+                          {visibleColumns.actions &&
+                            (canUpdate || canDelete) && (
+                              <th className="break-words px-3 py-4 text-right font-semibold text-slate-500 dark:text-slate-300">
+                                Actions
+                              </th>
+                            )}
                         </tr>
                       </thead>
 
@@ -1799,18 +1804,19 @@ export default function CustomersPage() {
                             className="transition-colors hover:bg-blue-50/50 dark:hover:bg-blue-950/20"
                           >
                             {visibleColumns.customer && (
-                              <td className="px-5 py-4">
-                                <div className="flex min-w-[210px] items-center gap-3">
+                              <td className="min-w-0 px-3 py-4">
+                                <div className="flex min-w-0 items-center gap-2">
                                   <CustomerAvatar
                                     name={customer.customer_name}
                                   />
 
                                   <div className="min-w-0">
-                                    <p className="font-semibold text-slate-900 dark:text-white">
-                                      {customer.customer_name || "Unnamed Customer"}
+                                    <p className="break-words font-semibold text-slate-900 dark:text-white">
+                                      {customer.customer_name ||
+                                        "Unnamed Customer"}
                                     </p>
 
-                                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                    <p className="mt-1 break-all text-xs text-slate-500 dark:text-slate-400">
                                       Code: {customer.customer_code || "—"}
                                     </p>
                                   </div>
@@ -1819,35 +1825,41 @@ export default function CustomersPage() {
                             )}
 
                             {visibleColumns.contact && (
-                              <td className="px-5 py-4">
-                                <div className="min-w-[180px] space-y-1.5">
-                                  <p className="flex items-center gap-2 text-slate-700 dark:text-slate-300">
-                                    <Phone className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                                    {customer.phone || "No phone"}
+                              <td className="min-w-0 px-3 py-4">
+                                <div className="min-w-0 space-y-1.5">
+                                  <p className="flex min-w-0 items-start gap-2 break-words text-slate-700 dark:text-slate-300">
+                                    <Phone className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
+
+                                    <span className="min-w-0 break-all">
+                                      {customer.phone || "No phone"}
+                                    </span>
                                   </p>
 
-                                  <p className="flex items-center gap-2 break-all text-xs text-slate-500 dark:text-slate-400">
-                                    <Mail className="h-3.5 w-3.5 shrink-0" />
-                                    {customer.email || "No email"}
+                                  <p className="flex min-w-0 items-start gap-2 break-all text-xs text-slate-500 dark:text-slate-400">
+                                    <Mail className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+
+                                    <span className="min-w-0 break-all">
+                                      {customer.email || "No email"}
+                                    </span>
                                   </p>
                                 </div>
                               </td>
                             )}
 
                             {visibleColumns.sales && (
-                              <td className="whitespace-nowrap px-5 py-4 text-right font-medium tabular-nums text-slate-700 dark:text-slate-300">
+                              <td className="break-words px-3 py-4 text-right font-medium tabular-nums text-slate-700 dark:text-slate-300">
                                 {formatAmount(customer.total_sales)}
                               </td>
                             )}
 
                             {visibleColumns.paid && (
-                              <td className="whitespace-nowrap px-5 py-4 text-right font-medium tabular-nums text-slate-700 dark:text-slate-300">
+                              <td className="break-words px-3 py-4 text-right font-medium tabular-nums text-slate-700 dark:text-slate-300">
                                 {formatAmount(customer.total_paid)}
                               </td>
                             )}
 
                             {visibleColumns.balance && (
-                              <td className="whitespace-nowrap px-5 py-4 text-right">
+                              <td className="break-words px-3 py-4 text-right">
                                 <span className="font-bold tabular-nums text-slate-900 dark:text-white">
                                   {formatAmount(customer.customer_balance)}
                                 </span>
@@ -1855,52 +1867,53 @@ export default function CustomersPage() {
                             )}
 
                             {visibleColumns.status && (
-                              <td className="px-5 py-4">
+                              <td className="px-3 py-4">
                                 <StatusBadge
                                   active={customer.is_active === true}
                                 />
                               </td>
                             )}
 
-                            {visibleColumns.actions && (canUpdate || canDelete) && (
-                              <td className="px-5 py-4">
-                                <div className="flex justify-end gap-2">
-                                  {canUpdate && (
-                                    <button
-                                      type="button"
-                                      onClick={() => editCustomer(customer)}
-                                      aria-label={`Edit ${customer.customer_name}`}
-                                      title="Edit customer"
-                                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-blue-900 dark:hover:bg-blue-950/40 dark:hover:text-blue-300"
-                                    >
-                                      <Pencil className="h-3.5 w-3.5" />
-                                      Edit
-                                    </button>
-                                  )}
+                            {visibleColumns.actions &&
+                              (canUpdate || canDelete) && (
+                                <td className="px-2 py-4">
+                                  <div className="flex flex-wrap justify-end gap-1.5">
+                                    {canUpdate && (
+                                      <button
+                                        type="button"
+                                        onClick={() => editCustomer(customer)}
+                                        aria-label={`Edit ${customer.customer_name}`}
+                                        title="Edit customer"
+                                        className="inline-flex items-center justify-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs font-semibold text-slate-700 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-blue-900 dark:hover:bg-blue-950/40 dark:hover:text-blue-300"
+                                      >
+                                        <Pencil className="h-3.5 w-3.5" />
+                                        Edit
+                                      </button>
+                                    )}
 
-                                  {canDelete && (
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        deleteCustomer(customer.customer_id)
-                                      }
-                                      disabled={deletingId !== null}
-                                      aria-label={`Delete ${customer.customer_name}`}
-                                      title="Delete customer"
-                                      className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-white px-3 py-2 text-xs font-semibold text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-900/50 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950/40"
-                                    >
-                                      {String(deletingId) ===
-                                      String(customer.customer_id) ? (
-                                        <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-                                      ) : (
-                                        <Trash2 className="h-3.5 w-3.5" />
-                                      )}
-                                      Delete
-                                    </button>
-                                  )}
-                                </div>
-                              </td>
-                            )}
+                                    {canDelete && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          deleteCustomer(customer.customer_id)
+                                        }
+                                        disabled={deletingId !== null}
+                                        aria-label={`Delete ${customer.customer_name}`}
+                                        title="Delete customer"
+                                        className="inline-flex items-center justify-center gap-1 rounded-lg border border-red-200 bg-white px-2 py-2 text-xs font-semibold text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-900/50 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950/40"
+                                      >
+                                        {String(deletingId) ===
+                                          String(customer.customer_id) ? (
+                                          <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                                        ) : (
+                                          <Trash2 className="h-3.5 w-3.5" />
+                                        )}
+                                        Delete
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              )}
                           </tr>
                         ))}
                       </tbody>
@@ -1924,11 +1937,13 @@ export default function CustomersPage() {
 
                               <div className="min-w-0">
                                 <h3 className="break-words font-bold text-slate-900 dark:text-white">
-                                  {customer.customer_name || "Unnamed Customer"}
+                                  {customer.customer_name ||
+                                    "Unnamed Customer"}
                                 </h3>
 
                                 <p className="mt-1 break-all text-xs text-slate-500 dark:text-slate-400">
-                                  {customer.customer_code || "No customer code"}
+                                  {customer.customer_code ||
+                                    "No customer code"}
                                 </p>
                               </div>
                             </div>
@@ -1943,13 +1958,13 @@ export default function CustomersPage() {
 
                         {visibleColumns.contact && (
                           <div className="mt-4 space-y-2 rounded-xl bg-slate-50 p-3 text-sm dark:bg-slate-800/70">
-                            <p className="flex items-center gap-2 break-all text-slate-600 dark:text-slate-300">
-                              <Phone className="h-4 w-4 shrink-0 text-slate-400" />
+                            <p className="flex items-start gap-2 break-all text-slate-600 dark:text-slate-300">
+                              <Phone className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
                               {customer.phone || "No phone"}
                             </p>
 
-                            <p className="flex items-center gap-2 break-all text-slate-600 dark:text-slate-300">
-                              <Mail className="h-4 w-4 shrink-0 text-slate-400" />
+                            <p className="flex items-start gap-2 break-all text-slate-600 dark:text-slate-300">
+                              <Mail className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
                               {customer.email || "No email"}
                             </p>
 
@@ -1968,78 +1983,79 @@ export default function CustomersPage() {
                         {(visibleColumns.sales ||
                           visibleColumns.paid ||
                           visibleColumns.balance) && (
-                          <div className="mt-4 grid grid-cols-2 gap-3">
-                            {visibleColumns.sales && (
-                              <div className="rounded-xl border border-slate-100 p-3 dark:border-slate-800">
-                                <p className="text-xs text-slate-500 dark:text-slate-400">
-                                  Total Sales
-                                </p>
+                            <div className="mt-4 grid grid-cols-2 gap-3">
+                              {visibleColumns.sales && (
+                                <div className="min-w-0 rounded-xl border border-slate-100 p-3 dark:border-slate-800">
+                                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                                    Total Sales
+                                  </p>
 
-                                <p className="mt-1 break-words font-bold text-slate-900 dark:text-white">
-                                  {formatAmount(customer.total_sales)}
-                                </p>
-                              </div>
-                            )}
+                                  <p className="mt-1 break-words font-bold text-slate-900 dark:text-white">
+                                    {formatAmount(customer.total_sales)}
+                                  </p>
+                                </div>
+                              )}
 
-                            {visibleColumns.paid && (
-                              <div className="rounded-xl border border-slate-100 p-3 dark:border-slate-800">
-                                <p className="text-xs text-slate-500 dark:text-slate-400">
-                                  Total Paid
-                                </p>
+                              {visibleColumns.paid && (
+                                <div className="min-w-0 rounded-xl border border-slate-100 p-3 dark:border-slate-800">
+                                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                                    Total Paid
+                                  </p>
 
-                                <p className="mt-1 break-words font-bold text-emerald-700 dark:text-emerald-300">
-                                  {formatAmount(customer.total_paid)}
-                                </p>
-                              </div>
-                            )}
+                                  <p className="mt-1 break-words font-bold text-emerald-700 dark:text-emerald-300">
+                                    {formatAmount(customer.total_paid)}
+                                  </p>
+                                </div>
+                              )}
 
-                            {visibleColumns.balance && (
-                              <div className="col-span-2 rounded-xl border border-blue-100 bg-blue-50/60 p-3 dark:border-blue-900/50 dark:bg-blue-950/20">
-                                <p className="text-xs text-slate-500 dark:text-slate-400">
-                                  Customer Balance
-                                </p>
+                              {visibleColumns.balance && (
+                                <div className="col-span-2 min-w-0 rounded-xl border border-blue-100 bg-blue-50/60 p-3 dark:border-blue-900/50 dark:bg-blue-950/20">
+                                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                                    Customer Balance
+                                  </p>
 
-                                <p className="mt-1 break-words text-lg font-bold text-blue-800 dark:text-blue-300">
-                                  {formatAmount(customer.customer_balance)}
-                                </p>
-                              </div>
-                            )}
-                          </div>
-                        )}
+                                  <p className="mt-1 break-words text-lg font-bold text-blue-800 dark:text-blue-300">
+                                    {formatAmount(customer.customer_balance)}
+                                  </p>
+                                </div>
+                              )}
+                            </div>
+                          )}
 
-                        {visibleColumns.actions && (canUpdate || canDelete) && (
-                          <div className="mt-4 flex gap-2 border-t border-slate-100 pt-4 dark:border-slate-800">
-                            {canUpdate && (
-                              <button
-                                type="button"
-                                onClick={() => editCustomer(customer)}
-                                className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-blue-50 hover:text-blue-700 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-blue-950/40 dark:hover:text-blue-300"
-                              >
-                                <Pencil className="h-4 w-4" />
-                                Edit
-                              </button>
-                            )}
+                        {visibleColumns.actions &&
+                          (canUpdate || canDelete) && (
+                            <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-100 pt-4 dark:border-slate-800">
+                              {canUpdate && (
+                                <button
+                                  type="button"
+                                  onClick={() => editCustomer(customer)}
+                                  className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-blue-50 hover:text-blue-700 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-blue-950/40 dark:hover:text-blue-300"
+                                >
+                                  <Pencil className="h-4 w-4" />
+                                  Edit
+                                </button>
+                              )}
 
-                            {canDelete && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  deleteCustomer(customer.customer_id)
-                                }
-                                disabled={deletingId !== null}
-                                className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-red-200 px-3 py-2.5 text-sm font-semibold text-red-600 transition hover:bg-red-50 disabled:opacity-50 dark:border-red-900/50 dark:text-red-300 dark:hover:bg-red-950/40"
-                              >
-                                {String(deletingId) ===
-                                String(customer.customer_id) ? (
-                                  <LoaderCircle className="h-4 w-4 animate-spin" />
-                                ) : (
-                                  <Trash2 className="h-4 w-4" />
-                                )}
-                                Delete
-                              </button>
-                            )}
-                          </div>
-                        )}
+                              {canDelete && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    deleteCustomer(customer.customer_id)
+                                  }
+                                  disabled={deletingId !== null}
+                                  className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-red-200 px-3 py-2.5 text-sm font-semibold text-red-600 transition hover:bg-red-50 disabled:opacity-50 dark:border-red-900/50 dark:text-red-300 dark:hover:bg-red-950/40"
+                                >
+                                  {String(deletingId) ===
+                                    String(customer.customer_id) ? (
+                                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Trash2 className="h-4 w-4" />
+                                  )}
+                                  Delete
+                                </button>
+                              )}
+                            </div>
+                          )}
                       </article>
                     ))}
                   </div>

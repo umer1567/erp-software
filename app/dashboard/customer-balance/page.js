@@ -36,6 +36,26 @@ const inputClass =
 
 const headingClass = "text-sm font-medium text-slate-500 dark:text-slate-400";
 
+const CUSTOMER_BALANCE_COLUMNS = [
+  { key: "customer", label: "Customer" },
+  { key: "phone", label: "Phone" },
+  { key: "opening", label: "Opening" },
+  { key: "sales", label: "Sales" },
+  { key: "paid", label: "Paid" },
+  { key: "balance", label: "Balance" },
+  { key: "status", label: "Status" },
+];
+
+const DEFAULT_BALANCE_COLUMNS = {
+  customer: true,
+  phone: true,
+  opening: true,
+  sales: true,
+  paid: true,
+  balance: true,
+  status: true,
+};
+
 // =========================================================
 // HELPERS
 // =========================================================
@@ -133,7 +153,6 @@ function normalizePermission(data) {
 
   const canView = permission.can_view ?? permission.canView;
 
-  // Fail closed if the permission is missing or malformed.
   if (typeof canView !== "boolean") {
     return null;
   }
@@ -208,10 +227,7 @@ function LoadingSkeleton() {
       aria-label="Loading customer balances"
     >
       {Array.from({ length: 6 }, (_, index) => (
-        <div
-          key={index}
-          className="grid grid-cols-4 gap-4 sm:grid-cols-7"
-        >
+        <div key={index} className="grid grid-cols-4 gap-4 sm:grid-cols-7">
           {Array.from({ length: 7 }, (__, cellIndex) => (
             <div
               key={cellIndex}
@@ -267,6 +283,38 @@ export default function CustomerBalancePage() {
   const [permissionLoading, setPermissionLoading] = useState(true);
   const [permissionError, setPermissionError] = useState("");
 
+  // Column visibility state
+  const [visibleColumns, setVisibleColumns] = useState(
+    DEFAULT_BALANCE_COLUMNS
+  );
+  const [showColumnsMenu, setShowColumnsMenu] = useState(false);
+
+  const visibleColumnCount = CUSTOMER_BALANCE_COLUMNS.filter(
+  (column) => visibleColumns[column.key]
+).length;
+
+const toggleBalanceColumn = (key) => {
+  setVisibleColumns((previous) => {
+    const count = CUSTOMER_BALANCE_COLUMNS.filter(
+      (column) => previous[column.key]
+    ).length;
+
+    // Never allow the final visible column to be unchecked.
+    if (previous[key] && count <= 1) {
+      return previous;
+    }
+
+    return {
+      ...previous,
+      [key]: !previous[key],
+    };
+  });
+};
+
+  const showAllBalanceColumns = () => {
+    setVisibleColumns({ ...DEFAULT_BALANCE_COLUMNS });
+  };
+
   const canView = permission?.can_view === true;
 
   // =======================================================
@@ -320,7 +368,6 @@ export default function CustomerBalancePage() {
       }
     }
 
-    // Defer starting the request; state updates occur after async work.
     Promise.resolve().then(() => {
       if (!controller.signal.aborted) {
         fetchPermission();
@@ -372,7 +419,6 @@ export default function CustomerBalancePage() {
     }
   }, []);
 
-  // Fetch balances only after view permission has been confirmed.
   useEffect(() => {
     if (permissionLoading || !canView) return undefined;
 
@@ -571,6 +617,7 @@ export default function CustomerBalancePage() {
 
   return (
     <div className="min-h-screen space-y-6 bg-slate-50/70 pb-8 dark:bg-slate-950">
+      {/* PAGE HEADER */}
       <section className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-slate-950 via-blue-950 to-indigo-900 p-6 text-white shadow-xl shadow-blue-950/10 sm:p-8">
         <div className="pointer-events-none absolute -right-16 -top-24 h-72 w-72 rounded-full border border-white/10" />
         <div className="pointer-events-none absolute -right-4 -top-12 h-52 w-52 rounded-full border border-white/10" />
@@ -636,6 +683,7 @@ export default function CustomerBalancePage() {
         </div>
       </section>
 
+      {/* SUMMARY CARDS */}
       <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <SummaryCard
           title="Total Customers"
@@ -678,6 +726,7 @@ export default function CustomerBalancePage() {
         />
       </section>
 
+      {/* CUSTOMER STATUS SUMMARY */}
       <section className={`${cardClass} p-4 sm:p-5`}>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <div className="flex items-center gap-3 rounded-xl bg-rose-50/80 p-4 dark:bg-rose-500/5">
@@ -724,6 +773,7 @@ export default function CustomerBalancePage() {
         </div>
       </section>
 
+      {/* ERROR MESSAGE */}
       {error && (
         <div
           role="alert"
@@ -745,13 +795,15 @@ export default function CustomerBalancePage() {
         </div>
       )}
 
-      <section className={`${cardClass} overflow-hidden`}>
+      {/* CUSTOMER BALANCE TABLE */}
+      <section className={`${cardClass} relative z-20 overflow-visible`}>
         <div className="flex flex-col gap-4 border-b border-slate-100 p-5 dark:border-slate-800 sm:p-6">
           <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
             <div className="flex items-center gap-3">
               <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-400">
                 <FileSearch className="h-5 w-5" />
               </div>
+
               <div>
                 <h2 className="text-lg font-bold text-slate-900 dark:text-white">
                   Customer Balances
@@ -769,9 +821,12 @@ export default function CustomerBalancePage() {
             </span>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_220px_auto]">
+          {/* SEARCH, FILTERS AND COLUMNS */}
+          <div className="relative z-30 grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_220px_auto_auto]">
+            {/* SEARCH */}
             <div className="relative">
               <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+
               <input
                 type="search"
                 value={search}
@@ -779,6 +834,7 @@ export default function CustomerBalancePage() {
                 placeholder="Search by customer name, code or phone..."
                 className={inputClass}
               />
+
               {search && (
                 <button
                   type="button"
@@ -791,6 +847,7 @@ export default function CustomerBalancePage() {
               )}
             </div>
 
+            {/* STATUS FILTER */}
             <div className="relative">
               <select
                 value={statusFilter}
@@ -803,9 +860,110 @@ export default function CustomerBalancePage() {
                 <option value="ADVANCE">Advances only</option>
                 <option value="SETTLED">Settled only</option>
               </select>
+
               <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             </div>
 
+            {/* COLUMNS DROPDOWN */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowColumnsMenu((previous) => !previous)}
+                aria-expanded={showColumnsMenu}
+                aria-label="Choose visible columns"
+                className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+              >
+                <Activity className="h-4 w-4" />
+                Columns
+
+                <ChevronDown
+                  className={`h-4 w-4 transition-transform ${
+                    showColumnsMenu ? "rotate-180" : ""
+                  }`}
+                />
+              </button>
+
+              {showColumnsMenu && (
+                <div className="absolute right-0 top-full z-[100] mt-2 w-72 max-w-[calc(100vw-2rem)] rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl ring-1 ring-black/5 dark:border-slate-700 dark:bg-slate-900">
+                  {/* DROPDOWN HEADER */}
+                  <div className="mb-2 flex items-center justify-between gap-2 border-b border-slate-100 pb-3 dark:border-slate-800">
+                    <div>
+                      <p className="text-sm font-bold text-slate-800 dark:text-white">
+                        Table Columns
+                      </p>
+
+                      <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                        {visibleColumnCount} of{" "}
+                        {CUSTOMER_BALANCE_COLUMNS.length} visible
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={showAllBalanceColumns}
+                      className="shrink-0 rounded-lg px-2 py-1.5 text-xs font-semibold text-blue-600 transition hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-500/10"
+                    >
+                      Show All
+                    </button>
+                  </div>
+
+                  {/* SCROLLABLE COLUMN OPTIONS */}
+                  <div className="max-h-64 space-y-1 overflow-y-auto overscroll-contain pr-1">
+                    {CUSTOMER_BALANCE_COLUMNS.map((column) => {
+                      const isChecked = Boolean(
+                        visibleColumns[column.key]
+                      );
+
+                      const isLastVisible =
+                        isChecked && visibleColumnCount === 1;
+
+                      return (
+                        <label
+                          key={column.key}
+                          className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${
+                            isLastVisible
+                              ? "cursor-not-allowed bg-blue-50 dark:bg-blue-500/10"
+                              : "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800"
+                          }`}
+                        >
+                          <input
+  type="checkbox"
+  checked={Boolean(visibleColumns[column.key])}
+  onChange={() => toggleBalanceColumn(column.key)}
+  className="h-4 w-4 cursor-pointer accent-blue-600"
+/>
+
+                          <span
+                            className={`font-medium ${
+                              isLastVisible
+                                ? "text-blue-700 dark:text-blue-400"
+                                : "text-slate-700 dark:text-slate-200"
+                            }`}
+                          >
+                            {column.label}
+                          </span>
+
+                          {/* {isLastVisible && (
+                            <span className="ml-auto text-[10px] font-semibold uppercase tracking-wide text-blue-600 dark:text-blue-400">
+                              Required
+                            </span>
+                          )} */}
+                        </label>
+                      );
+                    })}
+                  </div>
+
+                  {/* DROPDOWN FOOTER */}
+                  {/* <div className="mt-2 border-t border-slate-100 pt-2 dark:border-slate-800">
+                    <p className="text-[11px] leading-5 text-slate-500 dark:text-slate-400">
+                      At least one column must remain visible.
+                    </p>
+                  </div> */}
+                </div>
+              )}
+            </div>
+
+            {/* CLEAR FILTERS */}
             <button
               type="button"
               onClick={() => {
@@ -816,11 +974,12 @@ export default function CustomerBalancePage() {
               className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
             >
               <X className="h-4 w-4" />
-              Clear filters
+              Clear Filters
             </button>
           </div>
         </div>
 
+        {/* TABLE CONTENT */}
         {loading ? (
           <LoadingSkeleton />
         ) : error && balances.length === 0 ? (
@@ -828,13 +987,16 @@ export default function CustomerBalancePage() {
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-red-50 dark:bg-red-500/10">
               <AlertCircle className="h-7 w-7 text-red-500" />
             </div>
+
             <h3 className="mt-4 font-bold text-slate-900 dark:text-white">
               Could not load customer balances
             </h3>
+
             <p className="mt-2 max-w-md text-sm text-slate-500 dark:text-slate-400">
-              Check your connection and try loading the customer balance report
-              again.
+              Check your connection and try loading the customer balance
+              report again.
             </p>
+
             <button
               type="button"
               onClick={() => loadBalances()}
@@ -849,14 +1011,17 @@ export default function CustomerBalancePage() {
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 dark:bg-slate-800">
               <Search className="h-7 w-7 text-slate-400" />
             </div>
+
             <h3 className="mt-4 font-bold text-slate-900 dark:text-white">
               No customers found
             </h3>
+
             <p className="mt-2 max-w-md text-sm text-slate-500 dark:text-slate-400">
               {balances.length === 0
                 ? "No customer balance records are available yet."
                 : "Try another search term or change the balance status filter."}
             </p>
+
             {(search || statusFilter !== "ALL") && (
               <button
                 type="button"
@@ -871,24 +1036,24 @@ export default function CustomerBalancePage() {
             )}
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[1050px] border-collapse text-sm">
+          <div className="max-h-[600px] w-full overflow-auto">
+            <table className="w-full min-w-full table-auto">
               <thead>
                 <tr className="bg-slate-50 dark:bg-slate-800/80">
-                  {[
-                    ["Customer", "left"],
-                    ["Phone", "left"],
-                    ["Opening", "right"],
-                    ["Sales", "right"],
-                    ["Paid", "right"],
-                    ["Balance", "right"],
-                    ["Status", "left"],
-                  ].map(([label, align]) => (
+                  {CUSTOMER_BALANCE_COLUMNS.filter(
+                    (column) => visibleColumns[column.key]
+                  ).map((column) => (
                     <th
-                      key={label}
-                      className={`px-5 py-4 text-${align} text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400`}
+                      key={column.key}
+                      className={`whitespace-nowrap px-5 py-4 ${
+                        ["opening", "sales", "paid", "balance"].includes(
+                          column.key
+                        )
+                          ? "text-right"
+                          : "text-left"
+                      } text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400`}
                     >
-                      {label}
+                      {column.label}
                     </th>
                   ))}
                 </tr>
@@ -907,57 +1072,80 @@ export default function CustomerBalancePage() {
                       key={customer.customer_id}
                       className="border-t border-slate-100 transition-colors hover:bg-blue-50/40 dark:border-slate-800 dark:hover:bg-slate-800/50"
                     >
-                      <td className="px-5 py-4">
-                        <div className="flex items-center gap-3">
-                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 text-xs font-bold text-white shadow-sm">
-                            {getInitials(customer.customer_name)}
-                          </div>
-                          <div className="min-w-0">
-                            <p className="font-semibold text-slate-800 dark:text-slate-100">
-                              {customer.customer_name || "Unnamed customer"}
-                            </p>
-                            <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
-                              {customer.customer_code || "No customer code"}
-                            </p>
-                          </div>
-                        </div>
-                      </td>
+                      {visibleColumns.customer && (
+                        <td className="px-5 py-4">
+                          <div className="flex items-center gap-3">
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 text-xs font-bold text-white shadow-sm">
+                              {getInitials(customer.customer_name)}
+                            </div>
 
-                      <td className="whitespace-nowrap px-5 py-4 text-slate-600 dark:text-slate-300">
-                        {customer.phone || "—"}
-                      </td>
-                      <td className="whitespace-nowrap px-5 py-4 text-right tabular-nums text-slate-600 dark:text-slate-300">
-                        {formatAmount(opening)}
-                      </td>
-                      <td className="whitespace-nowrap px-5 py-4 text-right font-medium tabular-nums text-slate-800 dark:text-slate-200">
-                        {formatAmount(sales)}
-                      </td>
-                      <td className="whitespace-nowrap px-5 py-4 text-right font-medium tabular-nums text-emerald-700 dark:text-emerald-400">
-                        {formatAmount(paid)}
-                      </td>
-                      <td className="whitespace-nowrap px-5 py-4 text-right">
-                        <span
-                          className={`font-bold tabular-nums ${
-                            balance > 0
-                              ? "text-rose-700 dark:text-rose-400"
-                              : balance < 0
-                                ? "text-blue-700 dark:text-blue-400"
-                                : "text-emerald-700 dark:text-emerald-400"
-                          }`}
-                        >
-                          {formatAmount(balance)}
-                        </span>
-                      </td>
-                      <td className="px-5 py-4">
-                        <span
-                          className={`inline-flex items-center gap-2 whitespace-nowrap rounded-full px-2.5 py-1.5 text-xs font-semibold ${status.className}`}
-                        >
+                            <div className="min-w-0">
+                              <p className="font-semibold text-slate-800 dark:text-slate-100">
+                                {customer.customer_name ||
+                                  "Unnamed customer"}
+                              </p>
+
+                              <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
+                                {customer.customer_code ||
+                                  "No customer code"}
+                              </p>
+                            </div>
+                          </div>
+                        </td>
+                      )}
+
+                      {visibleColumns.phone && (
+                        <td className="whitespace-nowrap px-5 py-4 text-slate-600 dark:text-slate-300">
+                          {customer.phone || "—"}
+                        </td>
+                      )}
+
+                      {visibleColumns.opening && (
+                        <td className="whitespace-nowrap px-5 py-4 text-right tabular-nums text-slate-600 dark:text-slate-300">
+                          {formatAmount(opening)}
+                        </td>
+                      )}
+
+                      {visibleColumns.sales && (
+                        <td className="whitespace-nowrap px-5 py-4 text-right font-medium tabular-nums text-slate-800 dark:text-slate-200">
+                          {formatAmount(sales)}
+                        </td>
+                      )}
+
+                      {visibleColumns.paid && (
+                        <td className="whitespace-nowrap px-5 py-4 text-right font-medium tabular-nums text-emerald-700 dark:text-emerald-400">
+                          {formatAmount(paid)}
+                        </td>
+                      )}
+
+                      {visibleColumns.balance && (
+                        <td className="whitespace-nowrap px-5 py-4 text-right">
                           <span
-                            className={`h-1.5 w-1.5 rounded-full ${status.dotClass}`}
-                          />
-                          {status.label}
-                        </span>
-                      </td>
+                            className={`font-bold tabular-nums ${
+                              balance > 0
+                                ? "text-rose-700 dark:text-rose-400"
+                                : balance < 0
+                                  ? "text-blue-700 dark:text-blue-400"
+                                  : "text-emerald-700 dark:text-emerald-400"
+                            }`}
+                          >
+                            {formatAmount(balance)}
+                          </span>
+                        </td>
+                      )}
+
+                      {visibleColumns.status && (
+                        <td className="px-5 py-4">
+                          <span
+                            className={`inline-flex items-center gap-2 whitespace-nowrap rounded-full px-2.5 py-1.5 text-xs font-semibold ${status.className}`}
+                          >
+                            <span
+                              className={`h-1.5 w-1.5 rounded-full ${status.dotClass}`}
+                            />
+                            {status.label}
+                          </span>
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -965,38 +1153,60 @@ export default function CustomerBalancePage() {
 
               <tfoot>
                 <tr className="border-t-2 border-slate-200 bg-slate-100/80 dark:border-slate-700 dark:bg-slate-800">
-                  <td
-                    colSpan={2}
-                    className="px-5 py-5 text-right font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200"
-                  >
-                    Filtered Total
-                  </td>
-                  <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-slate-700 dark:text-slate-200">
-                    {formatAmount(filteredTotals.opening)}
-                  </td>
-                  <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-slate-800 dark:text-white">
-                    {formatAmount(filteredTotals.sales)}
-                  </td>
-                  <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-emerald-700 dark:text-emerald-400">
-                    {formatAmount(filteredTotals.paid)}
-                  </td>
-                  <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-rose-700 dark:text-rose-400">
-                    {formatAmount(filteredTotals.balance)}
-                  </td>
-                  <td className="px-5 py-5 text-xs font-medium text-slate-500 dark:text-slate-400">
-                    {filteredBalances.length} customers
-                  </td>
+                  {(visibleColumns.customer || visibleColumns.phone) && (
+                    <td
+                      colSpan={
+                        Number(visibleColumns.customer) +
+                        Number(visibleColumns.phone)
+                      }
+                      className="px-5 py-5 text-right font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200"
+                    >
+                      Filtered Total
+                    </td>
+                  )}
+
+                  {visibleColumns.opening && (
+                    <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-slate-700 dark:text-slate-200">
+                      {formatAmount(filteredTotals.opening)}
+                    </td>
+                  )}
+
+                  {visibleColumns.sales && (
+                    <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-slate-800 dark:text-white">
+                      {formatAmount(filteredTotals.sales)}
+                    </td>
+                  )}
+
+                  {visibleColumns.paid && (
+                    <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-emerald-700 dark:text-emerald-400">
+                      {formatAmount(filteredTotals.paid)}
+                    </td>
+                  )}
+
+                  {visibleColumns.balance && (
+                    <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-rose-700 dark:text-rose-400">
+                      {formatAmount(filteredTotals.balance)}
+                    </td>
+                  )}
+
+                  {visibleColumns.status && (
+                    <td className="px-5 py-5 text-xs font-medium text-slate-500 dark:text-slate-400">
+                      {filteredBalances.length} customers
+                    </td>
+                  )}
                 </tr>
               </tfoot>
             </table>
           </div>
         )}
 
+        {/* TABLE FOOTER */}
         {!loading && !error && balances.length > 0 && (
           <div className="flex flex-col gap-2 border-t border-slate-100 px-5 py-4 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400 sm:flex-row sm:items-center sm:justify-between sm:px-6">
             <span>
               Showing {filteredBalances.length} of {balances.length} customers
             </span>
+
             <span className="inline-flex items-center gap-1.5">
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
               Customer balances loaded
@@ -1005,8 +1215,10 @@ export default function CustomerBalancePage() {
         )}
       </section>
 
+      {/* BALANCE GUIDE */}
       <div className="flex items-start gap-2 rounded-xl border border-blue-100 bg-blue-50/70 px-4 py-3 text-xs leading-5 text-blue-800 dark:border-blue-900/40 dark:bg-blue-500/5 dark:text-blue-300">
         <CircleDollarSign className="mt-0.5 h-4 w-4 shrink-0" />
+
         <p>
           <span className="font-semibold">Balance guide:</span> A positive
           balance is shown as receivable, a negative balance as an advance, and
