@@ -12,7 +12,11 @@ export async function GET(request) {
 
     if (!user) {
       return NextResponse.json(
-        { success: false, message: "Unauthorized", permissions: [] },
+        {
+          success: false,
+          message: "Unauthorized",
+          permissions: [],
+        },
         {
           status: 401,
           headers: { "Cache-Control": "no-store" },
@@ -37,7 +41,6 @@ export async function GET(request) {
     const { searchParams } = new URL(request.url);
     const permissionKey = searchParams.get("permissionKey");
 
-    // If permissionKey is provided, return that permission only.
     if (permissionKey) {
       const result = await pool.query(
         `
@@ -58,29 +61,16 @@ export async function GET(request) {
         [user.roleId, permissionKey]
       );
 
-      if (result.rows.length === 0) {
-        return NextResponse.json(
-          {
-            success: true,
-            permission: {
-              permission_key: permissionKey,
-              can_view: false,
-              can_create: false,
-              can_update: false,
-              can_delete: false,
-            },
-          },
-          {
-            status: 200,
-            headers: { "Cache-Control": "no-store" },
-          }
-        );
-      }
-
       return NextResponse.json(
         {
           success: true,
-          permission: result.rows[0],
+          permission: result.rows[0] || {
+            permission_key: permissionKey,
+            can_view: false,
+            can_create: false,
+            can_update: false,
+            can_delete: false,
+          },
         },
         {
           status: 200,
@@ -89,7 +79,6 @@ export async function GET(request) {
       );
     }
 
-    // Without permissionKey, return the complete permission matrix.
     const result = await pool.query(
       `
         SELECT
