@@ -6,25 +6,22 @@ import { getCurrentUser } from "@/lib/auth";
 export const dynamic = "force-dynamic";
 
 function unauthorizedResponse() {
-  const response = NextResponse.json(
+  // Do not clear erp_token here.
+  // A delayed response from an expired session must never
+  // delete a newer cookie issued by a successful login.
+  return NextResponse.json(
     {
       success: false,
       code: "SESSION_EXPIRED",
       message: "Your session has expired. Please log in again.",
     },
-    { status: 401 }
+    {
+      status: 401,
+      headers: {
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+      },
+    }
   );
-
-  response.cookies.set("erp_token", "", {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    expires: new Date(0),
-    maxAge: 0,
-    path: "/",
-  });
-
-  return response;
 }
 
 export async function POST() {
@@ -55,10 +52,17 @@ export async function POST() {
       return unauthorizedResponse();
     }
 
-    return NextResponse.json({
-      success: true,
-      message: "Session activity updated.",
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        message: "Session activity updated.",
+      },
+      {
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }
+    );
   } catch (error) {
     console.error("Session activity error:", error);
 
@@ -67,7 +71,12 @@ export async function POST() {
         success: false,
         message: "Unable to validate session.",
       },
-      { status: 500 }
+      {
+        status: 500,
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }
     );
   }
 }

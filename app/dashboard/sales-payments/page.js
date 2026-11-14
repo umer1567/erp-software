@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useMemo, useState } from "react";
 import jsPDF from "jspdf";
@@ -164,9 +164,8 @@ function PaymentMethodBadge({ method }) {
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-bold ring-1 ring-inset ${
-        styles[normalized] || styles.OTHER
-      }`}
+      className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-bold ring-1 ring-inset ${styles[normalized] || styles.OTHER
+        }`}
     >
       <span className="h-1.5 w-1.5 rounded-full bg-current" />
       {normalized}
@@ -301,6 +300,72 @@ export default function SalesPaymentsPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [methodFilter, setMethodFilter] = useState("ALL");
 
+  const DEFAULT_VISIBLE_COLUMNS = {
+    payment: true,
+    invoice: true,
+    customer: true,
+    date: true,
+    amount: true,
+    method: true,
+    reference: true,
+    actions: true,
+  };
+
+  const paymentColumns = [
+    { key: "payment", label: "Payment" },
+    { key: "invoice", label: "Invoice" },
+    { key: "customer", label: "Customer" },
+    { key: "date", label: "Date" },
+    { key: "amount", label: "Amount" },
+    { key: "method", label: "Method" },
+    { key: "reference", label: "Reference" },
+    { key: "actions", label: "Actions" },
+  ];
+
+  const [visibleColumns, setVisibleColumns] = useState({
+    ...DEFAULT_VISIBLE_COLUMNS,
+  });
+
+  const [showColumnDropdown, setShowColumnDropdown] = useState(false);
+
+  const visibleColumnCount = paymentColumns.filter(
+    (column) => visibleColumns[column.key]
+  ).length;
+
+  const allColumnsVisible = visibleColumnCount === paymentColumns.length;
+
+  const toggleColumn = (key) => {
+  setVisibleColumns((previous) => {
+    const selectedCount = paymentColumns.filter(
+      (column) => previous[column.key]
+    ).length;
+
+    // Prevent removing the last selected column
+    if (previous[key] && selectedCount <= 1) {
+      return previous;
+    }
+
+    return {
+      ...previous,
+      [key]: !previous[key],
+    };
+  });
+};
+
+  const toggleAllColumns = () => {
+    const showAll = !allColumnsVisible;
+
+    setVisibleColumns(
+      Object.fromEntries(
+        paymentColumns.map((column) => [column.key, showAll])
+      )
+    );
+  };
+
+  const resetColumns = () => {
+    setVisibleColumns({ ...DEFAULT_VISIBLE_COLUMNS });
+  };
+
   const canView = permissions.can_view;
   const canCreate = permissions.can_create;
   const canEdit = permissions.can_update;
@@ -308,91 +373,88 @@ export default function SalesPaymentsPage() {
 
   // Load current user's permissions.
   // Load current user's permissions.
-useEffect(() => {
-  let cancelled = false;
+  // Load current user's permissions.
+  useEffect(() => {
+    let cancelled = false;
 
-  async function loadPermissions() {
-    setPermissionLoading(true);
-    setPermissionError("");
+    async function loadPermissions() {
+      setPermissionLoading(true);
+      setPermissionError("");
 
-    try {
-      const response = await fetch(
-        `/api/permissions/current?permissionKey=${encodeURIComponent(
-          PERMISSION_KEY
-        )}`,
-        {
-          cache: "no-store",
-        }
-      );
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          data.message || "Failed to load Sales Payment permissions."
-        );
-      }
-
-      // Support both API response formats:
-      // { permission: {...} }
-      // { permissions: [...] }
-      let permission = data.permission || null;
-
-      if (!permission && Array.isArray(data.permissions)) {
-        permission = data.permissions.find(
-          (item) =>
-            String(item.permission_key || "").trim().toLowerCase() ===
+      try {
+        const response = await fetch(
+          `/api/permissions/current?permissionKey=${encodeURIComponent(
             PERMISSION_KEY
+          )}`,
+          {
+            cache: "no-store",
+          }
         );
-      }
 
-      // Also support a direct permission object response.
-      if (!permission && data.permission_key === PERMISSION_KEY) {
-        permission = data;
-      }
+        const data = await response.json();
 
-      const isEnabled = (value) =>
-        value === true ||
-        value === 1 ||
-        value === "1" ||
-        String(value).toLowerCase() === "true";
+        if (!response.ok) {
+          throw new Error(
+            data.message || "Failed to load Sales Payment permissions."
+          );
+        }
 
-      if (!permission) {
-        throw new Error(
-          `Permission "${PERMISSION_KEY}" was not found in the API response.`
-        );
-      }
+        let permission = data.permission || null;
 
-      if (!cancelled) {
-        setPermissions({
-          can_view: isEnabled(permission.can_view),
-          can_create: isEnabled(permission.can_create),
-          can_update: isEnabled(permission.can_update),
-          can_delete: isEnabled(permission.can_delete),
-        });
-      }
-    } catch (err) {
-      console.error("Sales Payment permission error:", err);
+        if (!permission && Array.isArray(data.permissions)) {
+          permission = data.permissions.find(
+            (item) =>
+              String(item.permission_key || "").trim().toLowerCase() ===
+              PERMISSION_KEY
+          );
+        }
 
-      if (!cancelled) {
-        setPermissions(defaultPermissions);
-        setPermissionError(
-          err.message || "Unable to verify your permissions."
-        );
-      }
-    } finally {
-      if (!cancelled) {
-        setPermissionLoading(false);
+        if (!permission && data.permission_key === PERMISSION_KEY) {
+          permission = data;
+        }
+
+        const isEnabled = (value) =>
+          value === true ||
+          value === 1 ||
+          value === "1" ||
+          String(value).toLowerCase() === "true";
+
+        if (!permission) {
+          throw new Error(
+            `Permission "${PERMISSION_KEY}" was not found in the API response.`
+          );
+        }
+
+        if (!cancelled) {
+          setPermissions({
+            can_view: isEnabled(permission.can_view),
+            can_create: isEnabled(permission.can_create),
+            can_update: isEnabled(permission.can_update),
+            can_delete: isEnabled(permission.can_delete),
+          });
+        }
+      } catch (err) {
+        console.error("Sales Payment permission error:", err);
+
+        if (!cancelled) {
+          setPermissions(defaultPermissions);
+          setPermissionError(
+            err.message || "Unable to verify your permissions."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setPermissionLoading(false);
+        }
       }
     }
-  }
 
-  loadPermissions();
+    loadPermissions();
 
-  return () => {
-    cancelled = true;
-  };
-}, [permissionRetry]);
+    return () => {
+      cancelled = true;
+    };
+  }, [permissionRetry]);
 
   // Load payment data only after View permission is confirmed.
   useEffect(() => {
@@ -413,11 +475,15 @@ useEffect(() => {
         const invoiceData = await invoiceResponse.json();
 
         if (!paymentResponse.ok) {
-          throw new Error(paymentData.message || "Failed to load payments.");
+          throw new Error(
+            paymentData.message || "Failed to load payments."
+          );
         }
 
         if (!invoiceResponse.ok) {
-          throw new Error(invoiceData.message || "Failed to load invoices.");
+          throw new Error(
+            invoiceData.message || "Failed to load invoices."
+          );
         }
 
         if (!cancelled) {
@@ -431,7 +497,9 @@ useEffect(() => {
           setError(err.message || "Failed to load data.");
         }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     }
 
@@ -467,7 +535,7 @@ useEffect(() => {
       const matchesMethod =
         methodFilter === "ALL" ||
         String(payment.payment_method || "OTHER").toUpperCase() ===
-          methodFilter;
+        methodFilter;
 
       const searchableText = [
         payment.payment_number,
@@ -611,9 +679,9 @@ useEffect(() => {
       if (!response.ok) {
         throw new Error(
           data.message ||
-            (editingPaymentId
-              ? "Failed to update payment."
-              : "Failed to save payment.")
+          (editingPaymentId
+            ? "Failed to update payment."
+            : "Failed to save payment.")
         );
       }
 
@@ -1235,7 +1303,7 @@ useEffect(() => {
 
       {/* Payment history */}
       {!showPaymentForm && (
-        <section className={`${cardClass} overflow-hidden`}>
+        <section className={`${cardClass} relative overflow-visible`}>
           <div className="border-b border-slate-200 p-5 dark:border-slate-800 sm:p-6">
             <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
               <div className="flex items-start gap-3">
@@ -1259,12 +1327,13 @@ useEffect(() => {
               </span>
             </div>
 
-            <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
-              <div className="relative">
+            <div className="mt-5 flex flex-col gap-3 xl:flex-row xl:items-center">
+              <div className="relative min-w-0 flex-1">
                 <Icon
                   name="search"
                   className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
                 />
+
                 <input
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
@@ -1277,7 +1346,7 @@ useEffect(() => {
               <select
                 value={methodFilter}
                 onChange={(e) => setMethodFilter(e.target.value)}
-                className={inputClass}
+                className={`${inputClass} xl:w-[220px]`}
                 aria-label="Filter by payment method"
               >
                 <option value="ALL">All payment methods</option>
@@ -1287,6 +1356,117 @@ useEffect(() => {
                 <option value="CARD">Card</option>
                 <option value="OTHER">Other</option>
               </select>
+
+
+              {/* Columns dropdown */}
+              <div className="relative z-[60] shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowColumnDropdown((previous) => !previous)}
+                  className={secondaryButtonClass}
+                  aria-expanded={showColumnDropdown}
+                  aria-haspopup="dialog"
+                >
+                  <Icon name="file" className="h-4 w-4" />
+                  Columns
+
+                  <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-bold text-blue-700 dark:bg-blue-400/10 dark:text-blue-300">
+                    {visibleColumnCount}/{paymentColumns.length}
+                  </span>
+
+                  <Icon
+                    name="arrow"
+                    className={`h-3.5 w-3.5 transition-transform ${showColumnDropdown ? "rotate-90" : ""
+                      }`}
+                  />
+                </button>
+
+                {showColumnDropdown && (
+                  <>
+                    <button
+                      type="button"
+                      aria-label="Close columns menu"
+                      className="fixed inset-0 z-40 cursor-default"
+                      onClick={() => setShowColumnDropdown(false)}
+                    />
+
+                    <div
+                      className="absolute right-0 top-full z-50 mt-2 flex w-72 max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900"
+                      role="dialog"
+                      aria-label="Table column settings"
+                    >
+                      {/* Header */}
+                      <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-4 py-4 dark:border-slate-700">
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                            Table Columns
+                          </h3>
+                          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                            {visibleColumnCount} of {paymentColumns.length} visible
+                          </p>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => setShowColumnDropdown(false)}
+                          className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                          aria-label="Close"
+                        >
+                          <Icon name="close" className="h-4 w-4" />
+                        </button>
+                      </div>
+
+                      {/* Scrollable list */}
+                      <div className="columns-dropdown-scroll min-h-0 max-h-[55vh] overflow-y-auto overscroll-contain p-3">
+                        {/* Show All */}
+                        <label className="mb-2 flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50 px-3 py-3 dark:border-blue-400/20 dark:bg-blue-400/10">
+                          <span className="text-sm font-bold text-blue-700 dark:text-blue-300">
+                            Show All
+                          </span>
+
+                          <input
+                            type="checkbox"
+                            checked={allColumnsVisible}
+                            onChange={toggleAllColumns}
+                            className="h-4 w-4 shrink-0 cursor-pointer rounded accent-blue-600"
+                          />
+                        </label>
+
+                        <div className="mb-2 border-t border-slate-200 dark:border-slate-700" />
+
+                        {paymentColumns.map((column) => (
+                          <label
+                            key={column.key}
+                            className="flex cursor-pointer items-center justify-between gap-3 rounded-xl px-3 py-3 transition hover:bg-blue-50 dark:hover:bg-slate-800"
+                          >
+                            <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                              {column.label}
+                            </span>
+
+                            <input
+                              type="checkbox"
+                              checked={Boolean(visibleColumns[column.key])}
+                              onChange={() => toggleColumn(column.key)}
+                              className="h-4 w-4 shrink-0 cursor-pointer rounded border-slate-300 accent-blue-600 focus:ring-2 focus:ring-blue-500 dark:border-slate-600"
+                            />
+                          </label>
+                        ))}
+                      </div>
+
+                      {/* Footer */}
+                       <div className="shrink-0 border-t border-slate-200 p-3 dark:border-slate-700">
+                        {/* <button
+                          type="button"
+                          onClick={resetColumns}
+                          className="w-full rounded-xl bg-blue-50 px-3 py-2.5 text-xs font-bold text-blue-700 transition hover:bg-blue-100 dark:bg-blue-400/10 dark:text-blue-300 dark:hover:bg-blue-400/20"
+                        >
+                          Reset to Default
+                        </button> */}
+                      </div> 
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           </div>
 
@@ -1340,33 +1520,35 @@ useEffect(() => {
             </div>
           ) : (
             <>
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[1000px] border-collapse text-left">
+              <div
+                className="payment-table-scroll w-full max-w-full overflow-x-auto overflow-y-hidden"
+                role="region"
+                aria-label="Sales payment history table"
+                tabIndex={0}
+              >
+                <table
+                  className="w-full border-collapse text-left"
+                  style={{
+                    minWidth: `${Math.max(visibleColumnCount * 145, 350)}px`,
+                  }}
+                >
                   <thead className="bg-slate-50 dark:bg-slate-950/70">
                     <tr className="border-b border-slate-200 dark:border-slate-800">
-                      {[
-                        ["Payment", "left"],
-                        ["Invoice", "left"],
-                        ["Customer", "left"],
-                        ["Date", "left"],
-                        ["Amount", "right"],
-                        ["Method", "left"],
-                        ["Reference", "left"],
-                        ["Actions", "center"],
-                      ].map(([heading, align]) => (
-                        <th
-                          key={heading}
-                          className={`px-5 py-4 text-[11px] font-bold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400 ${
-                            align === "right"
+                      {paymentColumns
+                        .filter((column) => visibleColumns[column.key])
+                        .map((column) => (
+                          <th
+                            key={column.key}
+                            className={`whitespace-nowrap px-5 py-4 text-[11px] font-bold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400 ${column.key === "amount"
                               ? "text-right"
-                              : align === "center"
-                              ? "text-center"
-                              : "text-left"
-                          }`}
-                        >
-                          {heading}
-                        </th>
-                      ))}
+                              : column.key === "actions"
+                                ? "text-center"
+                                : "text-left"
+                              }`}
+                          >
+                            {column.label}
+                          </th>
+                        ))}
                     </tr>
                   </thead>
 
@@ -1376,95 +1558,103 @@ useEffect(() => {
                         key={payment.payment_id}
                         className="group transition-colors hover:bg-blue-50/50 dark:hover:bg-blue-400/[0.04]"
                       >
-                        <td className="px-5 py-4">
-                          <button
-                            type="button"
-                            onClick={() => viewPayment(payment.payment_id)}
-                            className="font-bold text-blue-700 transition hover:text-blue-900 hover:underline dark:text-blue-300 dark:hover:text-blue-200"
-                          >
-                            {payment.payment_number || "-"}
-                          </button>
-                          <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
-                            ID: {payment.payment_id}
-                          </p>
-                        </td>
-
-                        <td className="px-5 py-4">
-                          <span className="inline-flex rounded-lg bg-slate-100 px-2.5 py-1.5 text-xs font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                            {payment.invoice_number || "-"}
-                          </span>
-                        </td>
-
-                        <td className="px-5 py-4">
-                          <div className="flex items-center gap-3">
-                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300">
-                              <Icon name="user" className="h-4 w-4" />
-                            </div>
-                            <span className="max-w-[180px] truncate text-sm font-semibold text-slate-800 dark:text-slate-200">
-                              {payment.customer_name || "-"}
-                            </span>
-                          </div>
-                        </td>
-
-                        <td className="px-5 py-4 text-sm text-slate-600 dark:text-slate-300">
-                          <span className="inline-flex items-center gap-2 whitespace-nowrap">
-                            <Icon
-                              name="calendar"
-                              className="h-4 w-4 text-slate-400"
-                            />
-                            {formatDate(payment.payment_date)}
-                          </span>
-                        </td>
-
-                        <td className="px-5 py-4 text-right">
-                          <span className="whitespace-nowrap text-sm font-extrabold tabular-nums text-slate-900 dark:text-white">
-                            ₨ {formatMoney(payment.amount)}
-                          </span>
-                        </td>
-
-                        <td className="px-5 py-4">
-                          <PaymentMethodBadge
-                            method={payment.payment_method}
-                          />
-                        </td>
-
-                        <td className="max-w-[170px] truncate px-5 py-4 text-sm text-slate-500 dark:text-slate-400">
-                          {payment.reference_number || "—"}
-                        </td>
-
-                        <td className="px-5 py-4">
-                          <div className="flex items-center justify-center gap-2">
+                        {visibleColumns.payment && (
+                          <td className="whitespace-nowrap px-5 py-4">
                             <button
                               type="button"
                               onClick={() => viewPayment(payment.payment_id)}
-                              title="View receipt"
-                              aria-label={`View payment ${
-                                payment.payment_number || payment.payment_id
-                              }`}
-                              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-bold text-blue-700 transition hover:border-blue-300 hover:bg-blue-100 dark:border-blue-400/20 dark:bg-blue-400/10 dark:text-blue-300 dark:hover:bg-blue-400/20"
+                              className="font-bold text-blue-700 hover:underline dark:text-blue-300"
                             >
-                              <Icon name="eye" className="h-4 w-4" />
-                              View
+                              {payment.payment_number || "-"}
                             </button>
 
-                            {canEdit && (
+                            <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
+                              ID: {payment.payment_id}
+                            </p>
+                          </td>
+                        )}
+
+                        {visibleColumns.invoice && (
+                          <td className="whitespace-nowrap px-5 py-4">
+                            <span className="inline-flex rounded-lg bg-slate-100 px-2.5 py-1.5 text-xs font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                              {payment.invoice_number || "-"}
+                            </span>
+                          </td>
+                        )}
+
+                        {visibleColumns.customer && (
+                          <td className="px-5 py-4">
+                            <div className="flex items-center gap-3">
+                              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300">
+                                <Icon name="user" className="h-4 w-4" />
+                              </div>
+
+                              <span className="max-w-[180px] truncate text-sm font-semibold text-slate-800 dark:text-slate-200">
+                                {payment.customer_name || "-"}
+                              </span>
+                            </div>
+                          </td>
+                        )}
+
+                        {visibleColumns.date && (
+                          <td className="whitespace-nowrap px-5 py-4 text-sm text-slate-600 dark:text-slate-300">
+                            <span className="inline-flex items-center gap-2">
+                              <Icon
+                                name="calendar"
+                                className="h-4 w-4 text-slate-400"
+                              />
+                              {formatDate(payment.payment_date)}
+                            </span>
+                          </td>
+                        )}
+
+                        {visibleColumns.amount && (
+                          <td className="whitespace-nowrap px-5 py-4 text-right">
+                            <span className="text-sm font-extrabold tabular-nums text-slate-900 dark:text-white">
+                              ₨ {formatMoney(payment.amount)}
+                            </span>
+                          </td>
+                        )}
+
+                        {visibleColumns.method && (
+                          <td className="whitespace-nowrap px-5 py-4">
+                            <PaymentMethodBadge method={payment.payment_method} />
+                          </td>
+                        )}
+
+                        {visibleColumns.reference && (
+                          <td className="max-w-[170px] truncate px-5 py-4 text-sm text-slate-500 dark:text-slate-400">
+                            {payment.reference_number || "—"}
+                          </td>
+                        )}
+
+                        {visibleColumns.actions && (
+                          <td className="whitespace-nowrap px-5 py-4">
+                            <div className="flex items-center justify-center gap-2">
                               <button
                                 type="button"
-                                onClick={() =>
-                                  editPayment(payment.payment_id)
-                                }
-                                title="Edit payment"
-                                aria-label={`Edit payment ${
-                                  payment.payment_number || payment.payment_id
-                                }`}
-                                className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 text-xs font-bold text-amber-700 transition hover:border-amber-300 hover:bg-amber-100 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-300 dark:hover:bg-amber-400/20"
+                                onClick={() => viewPayment(payment.payment_id)}
+                                title="View receipt"
+                                className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-bold text-blue-700 transition hover:bg-blue-100 dark:border-blue-400/20 dark:bg-blue-400/10 dark:text-blue-300"
                               >
-                                <Icon name="edit" className="h-3.5 w-3.5" />
-                                Edit
+                                <Icon name="eye" className="h-4 w-4" />
+                                View
                               </button>
-                            )}
-                          </div>
-                        </td>
+
+                              {canEdit && (
+                                <button
+                                  type="button"
+                                  onClick={() => editPayment(payment.payment_id)}
+                                  title="Edit payment"
+                                  className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 text-xs font-bold text-amber-700 transition hover:bg-amber-100 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-300"
+                                >
+                                  <Icon name="edit" className="h-3.5 w-3.5" />
+                                  Edit
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>
@@ -1747,106 +1937,188 @@ useEffect(() => {
 
       {/* Theme-aware styling and print receipt */}
       <style jsx global>{`
-        .sales-payments-page {
-          color-scheme: light;
-        }
+  .sales-payments-page {
+    color-scheme: light;
+  }
 
-        html[data-theme="dark"] .sales-payments-page {
-          color-scheme: dark;
-        }
+  html[data-theme="dark"] .sales-payments-page {
+    color-scheme: dark;
+  }
 
-        .sales-payments-page input,
-        .sales-payments-page select,
-        .sales-payments-page textarea {
-          color: inherit;
-        }
+  .sales-payments-page input,
+  .sales-payments-page select,
+  .sales-payments-page textarea {
+    color: inherit;
+  }
 
-        .sales-payments-page input::placeholder,
-        .sales-payments-page textarea::placeholder {
-          opacity: 1;
-        }
+  .sales-payments-page input::placeholder,
+  .sales-payments-page textarea::placeholder {
+    opacity: 1;
+  }
 
-        .sales-payments-page select option {
-          background: white;
-          color: #0f172a;
-        }
+  .sales-payments-page select option {
+    background: white;
+    color: #0f172a;
+  }
 
-        html[data-theme="dark"] .sales-payments-page select option {
-          background: #0f172a;
-          color: #f1f5f9;
-        }
+  html[data-theme="dark"] .sales-payments-page select option {
+    background: #0f172a;
+    color: #f1f5f9;
+  }
 
-        @media print {
-          @page {
-            size: auto;
-            margin: 12mm;
-          }
+  /* Columns dropdown scrollbar */
+  .columns-dropdown-scroll {
+  max-height: 55vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #64748b #e2e8f0;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
 
-          body * {
-            visibility: hidden !important;
-          }
+  .columns-dropdown-scroll::-webkit-scrollbar {
+    width: 9px;
+  }
 
-          #payment-receipt,
-          #payment-receipt * {
-            visibility: visible !important;
-          }
+  .columns-dropdown-scroll::-webkit-scrollbar-track {
+    background: #e2e8f0;
+    border-radius: 20px;
+  }
 
-          #payment-receipt {
-            position: absolute !important;
-            left: 0 !important;
-            top: 0 !important;
-            width: 100% !important;
-            max-height: none !important;
-            overflow: visible !important;
-            padding: 0 !important;
-            color: #0f172a !important;
-            background: #ffffff !important;
-          }
+  .columns-dropdown-scroll::-webkit-scrollbar-thumb {
+    background: #64748b;
+    border: 2px solid #e2e8f0;
+    border-radius: 20px;
+  }
 
-          #payment-receipt,
-          #payment-receipt * {
-            color: #0f172a !important;
-            border-color: #e2e8f0 !important;
-            -webkit-print-color-adjust: exact;
-            print-color-adjust: exact;
-          }
+  .columns-dropdown-scroll::-webkit-scrollbar-thumb:hover {
+    background: #475569;
+  }
 
-          #payment-receipt .bg-slate-50,
-          #payment-receipt .bg-white,
-          #payment-receipt .dark\\:bg-slate-900 {
-            background: #ffffff !important;
-          }
+  /* Payment table horizontal scrollbar */
+  .payment-table-scroll {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: auto;
+    scrollbar-color: #64748b #e2e8f0;
+    -webkit-overflow-scrolling: touch;
+  }
 
-          #payment-receipt .bg-emerald-50 {
-            background: #ecfdf5 !important;
-          }
+  .payment-table-scroll::-webkit-scrollbar {
+    height: 13px;
+  }
 
-          #payment-receipt .text-emerald-800 {
-            color: #065f46 !important;
-          }
+  .payment-table-scroll::-webkit-scrollbar-track {
+    background: #e2e8f0;
+    border-radius: 20px;
+  }
 
-          #payment-receipt .text-emerald-700 {
-            color: #047857 !important;
-          }
+  .payment-table-scroll::-webkit-scrollbar-thumb {
+    background: #64748b;
+    border: 2px solid #e2e8f0;
+    border-radius: 20px;
+  }
 
-          #payment-receipt .text-slate-500,
-          #payment-receipt .text-slate-400 {
-            color: #64748b !important;
-          }
+  .payment-table-scroll::-webkit-scrollbar-thumb:hover {
+    background: #475569;
+  }
 
-          #payment-receipt .text-slate-900 {
-            color: #0f172a !important;
-          }
+  html[data-theme="dark"] .columns-dropdown-scroll,
+  html[data-theme="dark"] .payment-table-scroll {
+    scrollbar-color: #64748b #1e293b;
+  }
 
-          #payment-receipt .text-slate-700 {
-            color: #334155 !important;
-          }
+  html[data-theme="dark"] .columns-dropdown-scroll::-webkit-scrollbar-track,
+  html[data-theme="dark"] .payment-table-scroll::-webkit-scrollbar-track {
+    background: #1e293b;
+  }
 
-          .sales-payments-page {
-            background: #ffffff !important;
-          }
-        }
-      `}</style>
+  html[data-theme="dark"] .columns-dropdown-scroll::-webkit-scrollbar-thumb,
+  html[data-theme="dark"] .payment-table-scroll::-webkit-scrollbar-thumb {
+    background: #64748b;
+    border-color: #1e293b;
+  }
+
+  html[data-theme="dark"] .columns-dropdown-scroll::-webkit-scrollbar-thumb:hover,
+  html[data-theme="dark"] .payment-table-scroll::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+  }
+
+  @media print {
+    @page {
+      size: auto;
+      margin: 12mm;
+    }
+
+    body * {
+      visibility: hidden !important;
+    }
+
+    #payment-receipt,
+    #payment-receipt * {
+      visibility: visible !important;
+    }
+
+    #payment-receipt {
+      position: absolute !important;
+      left: 0 !important;
+      top: 0 !important;
+      width: 100% !important;
+      max-height: none !important;
+      overflow: visible !important;
+      padding: 0 !important;
+      color: #0f172a !important;
+      background: #ffffff !important;
+    }
+
+    #payment-receipt,
+    #payment-receipt * {
+      color: #0f172a !important;
+      border-color: #e2e8f0 !important;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    #payment-receipt .bg-slate-50,
+    #payment-receipt .bg-white,
+    #payment-receipt .dark\\:bg-slate-900 {
+      background: #ffffff !important;
+    }
+
+    #payment-receipt .bg-emerald-50 {
+      background: #ecfdf5 !important;
+    }
+
+    #payment-receipt .text-emerald-800 {
+      color: #065f46 !important;
+    }
+
+    #payment-receipt .text-emerald-700 {
+      color: #047857 !important;
+    }
+
+    #payment-receipt .text-slate-500,
+    #payment-receipt .text-slate-400 {
+      color: #64748b !important;
+    }
+
+    #payment-receipt .text-slate-900 {
+      color: #0f172a !important;
+    }
+
+    #payment-receipt .text-slate-700 {
+      color: #334155 !important;
+    }
+
+    .sales-payments-page {
+      background: #ffffff !important;
+    }
+  }
+`}</style>
     </div>
   );
 }

@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 
 const INITIAL_DATA = {
@@ -16,6 +16,21 @@ const INITIAL_PERMISSIONS = {
     canDelete: false,
     canViewPending: false,
 };
+
+const REGISTER_COLUMNS = [
+    { key: "transaction_date", label: "Tran Date" },
+    { key: "transaction_number", label: "Transaction Number" },
+    { key: "customer_name", label: "Customer" },
+    { key: "warehouse_name", label: "Location Name" },
+    { key: "source_order_number", label: "Created From" },
+    { key: "status", label: "Status" },
+    { key: "document_status", label: "Document Status" },
+    { key: "gross_amount", label: "Gross Amount" },
+];
+
+const DEFAULT_VISIBLE_COLUMNS = REGISTER_COLUMNS.map(
+    (column) => column.key
+);
 
 const toBoolean = (value) =>
     value === true ||
@@ -97,21 +112,90 @@ export default function DeliveryChallansPage() {
     const [view, setView] = useState("table");
     const [requesting, setRequesting] = useState(false);
 
+    // Column dropdown state.
+    const [columnsOpen, setColumnsOpen] = useState(false);
+    const [visibleColumns, setVisibleColumns] = useState(
+        DEFAULT_VISIBLE_COLUMNS
+    );
+
+    // Reference used to detect clicks outside the Columns dropdown.
+    const columnsMenuRef = useRef(null);
+
     /*
-     * Load the current user's permissions.
-     *
-     * The API should return:
-     * {
-     *   permissions: [
-     *     {
-     *       permission_key: "delivery_challans",
-     *       can_view: true,
-     *       can_create: true,
-     *       can_update: true,
-     *       can_delete: true
-     *     }
-     *   ]
-     * }
+     * Close Columns dropdown when clicking outside.
+     * Also close it when Escape is pressed.
+     */
+    useEffect(() => {
+        if (!columnsOpen) return;
+
+        function handleOutsideClick(event) {
+            if (
+                columnsMenuRef.current &&
+                !columnsMenuRef.current.contains(event.target)
+            ) {
+                setColumnsOpen(false);
+            }
+        }
+
+        function handleEscape(event) {
+            if (event.key === "Escape") {
+                setColumnsOpen(false);
+            }
+        }
+
+        document.addEventListener("mousedown", handleOutsideClick);
+        document.addEventListener("touchstart", handleOutsideClick);
+        document.addEventListener("keydown", handleEscape);
+
+        return () => {
+            document.removeEventListener(
+                "mousedown",
+                handleOutsideClick
+            );
+
+            document.removeEventListener(
+                "touchstart",
+                handleOutsideClick
+            );
+
+            document.removeEventListener(
+                "keydown",
+                handleEscape
+            );
+        };
+    }, [columnsOpen]);
+
+    /*
+     * Toggle an individual table column.
+     */
+    const toggleColumn = useCallback((columnKey) => {
+        setVisibleColumns((previous) => {
+            if (previous.includes(columnKey)) {
+                return previous.filter(
+                    (key) => key !== columnKey
+                );
+            }
+
+            return [...previous, columnKey];
+        });
+    }, []);
+
+    /*
+     * Show all columns.
+     */
+    const showAllColumns = useCallback(() => {
+        setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
+    }, []);
+
+    /*
+     * Hide all optional columns.
+     */
+    const hideAllColumns = useCallback(() => {
+        setVisibleColumns([]);
+    }, []);
+
+    /*
+     * Load current user's permissions.
      */
     const loadPermissions = useCallback(async () => {
         try {
@@ -128,15 +212,17 @@ export default function DeliveryChallansPage() {
             if (!response.ok) {
                 throw new Error(
                     result.message ||
-                        "Could not load user permissions."
+                    "Could not load user permissions."
                 );
             }
 
             setPermissions(normalizePermissions(result));
         } catch (err) {
-            console.error("Delivery Challans permission error:", err);
+            console.error(
+                "Delivery Challans permission error:",
+                err
+            );
 
-            // Fail closed: do not grant access if rights cannot be checked.
             setPermissions(INITIAL_PERMISSIONS);
         } finally {
             setPermissionsLoading(false);
@@ -167,7 +253,7 @@ export default function DeliveryChallansPage() {
             if (!response.ok || !result.success) {
                 throw new Error(
                     result.message ||
-                        "Could not load Delivery Challans."
+                    "Could not load Delivery Challans."
                 );
             }
 
@@ -175,7 +261,7 @@ export default function DeliveryChallansPage() {
         } catch (err) {
             setError(
                 err.message ||
-                    "Could not load Delivery Challans."
+                "Could not load Delivery Challans."
             );
         } finally {
             setLoading(false);
@@ -186,24 +272,18 @@ export default function DeliveryChallansPage() {
     /*
      * Initial data loading.
      */
-    /*
- * Initial data loading.
- * Defer the request to avoid synchronous state updates inside the effect.
- */
-useEffect(() => {
-    const timer = setTimeout(() => {
-        void loadChallans();
-    }, 0);
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            void loadChallans();
+        }, 0);
 
-    return () => {
-        clearTimeout(timer);
-    };
-}, [loadChallans]);
+        return () => {
+            clearTimeout(timer);
+        };
+    }, [loadChallans]);
 
     /*
      * Initial permission loading.
-     *
-     * Deferred to avoid synchronous state updates inside the effect.
      */
     useEffect(() => {
         const timer = setTimeout(() => {
@@ -232,7 +312,10 @@ useEffect(() => {
             handlePermissionsUpdated
         );
 
-        window.addEventListener("focus", handlePermissionsUpdated);
+        window.addEventListener(
+            "focus",
+            handlePermissionsUpdated
+        );
 
         document.addEventListener(
             "visibilitychange",
@@ -258,7 +341,7 @@ useEffect(() => {
     }, [loadPermissions]);
 
     /*
-     * Refresh both records and permissions.
+     * Refresh records and permissions.
      */
     const handleRefresh = useCallback(async () => {
         await Promise.all([
@@ -267,6 +350,9 @@ useEffect(() => {
         ]);
     }, [loadChallans, loadPermissions]);
 
+    /*
+     * Search and status filtering.
+     */
     const filtered = useMemo(() => {
         const query = search.trim().toLowerCase();
 
@@ -296,20 +382,27 @@ useEffect(() => {
         });
     }, [data.challans, search, statusFilter]);
 
+    /*
+     * Summary totals.
+     */
     const totals = useMemo(() => {
         const challans = data.challans || [];
 
         return {
             count: challans.length,
+
             pending: challans.filter(
                 (row) =>
                     String(row.document_status || "").toLowerCase() ===
                     "pending invoice"
             ).length,
+
             approved: challans.filter(
                 (row) =>
-                    String(row.status || "").toUpperCase() === "APPROVED"
+                    String(row.status || "").toUpperCase() ===
+                    "APPROVED"
             ).length,
+
             amount: challans.reduce(
                 (sum, row) =>
                     sum + Number(row.gross_amount || 0),
@@ -318,6 +411,9 @@ useEffect(() => {
         };
     }, [data.challans]);
 
+    /*
+     * Print report.
+     */
     function printReport(row) {
         window.open(
             `/dashboard/delivery-challans/${row.delivery_challan_id}?print=1`,
@@ -326,6 +422,9 @@ useEffect(() => {
         );
     }
 
+    /*
+     * Delete draft challan.
+     */
     async function deleteDraft(row) {
         if (!permissions.canDelete) {
             window.alert(
@@ -354,7 +453,7 @@ useEffect(() => {
             if (!response.ok || !result.success) {
                 throw new Error(
                     result.message ||
-                        "Could not delete the challan."
+                    "Could not delete the challan."
                 );
             }
 
@@ -362,7 +461,7 @@ useEffect(() => {
         } catch (err) {
             window.alert(
                 err.message ||
-                    "Could not delete the challan."
+                "Could not delete the challan."
             );
         }
     }
@@ -412,13 +511,14 @@ useEffect(() => {
     ];
 
     /*
-     * Do not render protected content until permissions are checked.
+     * Permissions loading.
      */
     if (permissionsLoading) {
         return (
             <main className="grid min-h-screen place-items-center bg-slate-50 p-6 dark:bg-slate-950">
                 <div className="text-center">
                     <div className="mx-auto h-12 w-12 animate-spin rounded-full border-4 border-slate-200 border-t-blue-600 dark:border-slate-700 dark:border-t-blue-400" />
+
                     <p className="mt-4 font-semibold text-slate-700 dark:text-slate-200">
                         Checking user permissions...
                     </p>
@@ -531,8 +631,10 @@ useEffect(() => {
                 </section>
 
                 {/* Delivery Challan Register */}
-                <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
-                    <div className="flex flex-col gap-4 border-b border-slate-200 p-5 dark:border-slate-800 lg:flex-row lg:items-center lg:justify-between">
+                <section className="overflow-visible rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+
+                    {/* Register toolbar */}
+                    <div className="flex flex-col gap-4 rounded-t-2xl border-b border-slate-200 p-5 dark:border-slate-800 lg:flex-row lg:items-center lg:justify-between">
                         <div>
                             <h2 className="text-xl font-bold">
                                 Delivery Challan Register
@@ -543,7 +645,7 @@ useEffect(() => {
                             </p>
                         </div>
 
-                        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                             <input
                                 className={inputClass}
                                 value={search}
@@ -568,6 +670,136 @@ useEffect(() => {
                                 <option value="VOID">Void</option>
                             </select>
 
+                            {/* Columns dropdown */}
+                            <div
+                                className="relative"
+                                ref={columnsMenuRef}
+                            >
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setColumnsOpen((previous) => !previous)
+                                    }
+                                    aria-expanded={columnsOpen}
+                                    aria-haspopup="true"
+                                    className="flex w-full items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-blue-400 hover:bg-blue-50 focus:outline-none focus:ring-4 focus:ring-blue-500/10 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                                >
+                                    <span className="flex items-center gap-2">
+                                        <span>☷</span>
+                                        Columns
+                                        <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-bold text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+                                            {visibleColumns.length}/{REGISTER_COLUMNS.length}
+                                        </span>
+                                    </span>
+
+                                    
+                                </button>
+
+                                {columnsOpen && (
+                                    <div
+                                        className="absolute right-0 top-full z-50 mt-2 w-full min-w-[260px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900 sm:w-[300px]"
+                                        role="dialog"
+                                        aria-label="Choose visible columns"
+                                    >
+                                        {/* Dropdown header */}
+                                        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3 dark:border-slate-700">
+                                            <div>
+                                                <p className="text-sm font-bold text-slate-800 dark:text-white">
+                                                    Customize Columns
+                                                </p>
+
+                                                <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                                                    Select columns to display
+                                                </p>
+                                            </div>
+
+                                            {/* <button
+                                                type="button"
+                                                onClick={() =>
+                                                    setColumnsOpen(false)
+                                                }
+                                                title="Close columns menu"
+                                                className="grid h-8 w-8 place-items-center rounded-lg text-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 dark:hover:bg-slate-800 dark:hover:text-white"
+                                            >
+                                                ×
+                                            </button> */}
+                                        </div>
+
+                                        {/* Show All / Hide All */}
+                                        <div className="flex gap-2 border-b border-slate-200 p-3 dark:border-slate-700">
+                                            <button
+                                                type="button"
+                                                onClick={showAllColumns}
+                                                className="flex-1 rounded-lg bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 transition hover:bg-blue-100 dark:bg-blue-950/50 dark:text-blue-300 dark:hover:bg-blue-950"
+                                            >
+                                                Show All
+                                            </button>
+
+                                            {/* <button
+                                                type="button"
+                                                onClick={hideAllColumns}
+                                                className="flex-1 rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-700 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+                                            >
+                                                Hide All
+                                            </button> */}
+                                        </div>
+
+                                        {/* Scrollable column list */}
+                                        <div
+                                            className="max-h-80 overflow-y-auto overscroll-contain p-2"
+                                            style={{
+                                                scrollbarWidth: "thin",
+                                                scrollbarColor: "#94a3b8 #f1f5f9",
+                                            }}
+                                        >
+                                            {REGISTER_COLUMNS.map((column) => {
+                                                const checked =
+                                                    visibleColumns.includes(
+                                                        column.key
+                                                    );
+
+                                                return (
+                                                    <label
+                                                        key={column.key}
+                                                        className="flex cursor-pointer items-center gap-3 rounded-lg px-3 py-3 text-sm transition hover:bg-blue-50 dark:hover:bg-slate-800"
+                                                    >
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={checked}
+                                                            onChange={() =>
+                                                                toggleColumn(
+                                                                    column.key
+                                                                )
+                                                            }
+                                                            className="h-4 w-4 cursor-pointer rounded border-slate-300 text-blue-600 accent-blue-600 focus:ring-blue-500 dark:border-slate-600"
+                                                        />
+
+                                                        <span className="flex-1 font-medium text-slate-700 dark:text-slate-200">
+                                                            {column.label}
+                                                        </span>
+
+                                                        {/* {checked && (
+                                                            <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                                                                Visible
+                                                            </span>
+                                                        )} */}
+                                                    </label>
+                                                );
+                                            })}
+                                        </div>
+
+                                        {/* Dropdown footer */}
+                                        <div className="border-t border-slate-200 bg-slate-50 px-4 py-3 dark:border-slate-700 dark:bg-slate-950">
+                                            <p className="text-xs text-slate-500 dark:text-slate-400">
+                                                {visibleColumns.length} of{" "}
+                                                {REGISTER_COLUMNS.length} columns visible
+                                            </p>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Table / Cards buttons */}
                             <div className="flex gap-2">
                                 <button
                                     type="button"
@@ -620,7 +852,7 @@ useEffect(() => {
                         </div>
                     )}
 
-                    {/* Loading */}
+                    {/* Loading / Empty / Records */}
                     {loading ? (
                         <div className="p-12 text-center">
                             <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-slate-200 border-t-blue-600 dark:border-slate-700 dark:border-t-blue-400" />
@@ -777,24 +1009,30 @@ useEffect(() => {
                     ) : (
                         /* Table view */
                         <div className="overflow-x-auto">
-                            <table className="w-full min-w-[1100px] text-left text-sm">
+                            <table className="w-full min-w-[900px] text-left text-sm">
                                 <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500 dark:bg-slate-950 dark:text-slate-400">
                                     <tr>
-                                        <th className="px-5 py-4">Actions</th>
-                                        <th className="px-5 py-4">Tran Date</th>
-                                        <th className="px-5 py-4">
-                                            Transaction Number
+                                        {/* Actions column is always visible */}
+                                        <th className="whitespace-nowrap px-5 py-4">
+                                            Actions
                                         </th>
-                                        <th className="px-5 py-4">Customer</th>
-                                        <th className="px-5 py-4">Location Name</th>
-                                        <th className="px-5 py-4">Created From</th>
-                                        <th className="px-5 py-4">Status</th>
-                                        <th className="px-5 py-4">
-                                            Document Status
-                                        </th>
-                                        <th className="px-5 py-4 text-right">
-                                            Gross Amount
-                                        </th>
+
+                                        {REGISTER_COLUMNS
+                                            .filter((column) =>
+                                                visibleColumns.includes(column.key)
+                                            )
+                                            .map((column) => (
+                                                <th
+                                                    key={column.key}
+                                                    className={`whitespace-nowrap px-5 py-4 ${
+                                                        column.key === "gross_amount"
+                                                            ? "text-right"
+                                                            : ""
+                                                    }`}
+                                                >
+                                                    {column.label}
+                                                </th>
+                                            ))}
                                     </tr>
                                 </thead>
 
@@ -804,7 +1042,8 @@ useEffect(() => {
                                             key={row.delivery_challan_id}
                                             className="transition hover:bg-blue-50/60 dark:hover:bg-slate-800/50"
                                         >
-                                            <td className="px-5 py-4">
+                                            {/* Actions column is always visible */}
+                                            <td className="whitespace-nowrap px-5 py-4">
                                                 <div className="flex gap-2">
                                                     <Link
                                                         title="View challan"
@@ -848,41 +1087,57 @@ useEffect(() => {
                                                 </div>
                                             </td>
 
-                                            <td className="whitespace-nowrap px-5 py-4">
-                                                {dateText(row.transaction_date)}
-                                            </td>
+                                            {visibleColumns.includes("transaction_date") && (
+                                                <td className="whitespace-nowrap px-5 py-4">
+                                                    {dateText(row.transaction_date)}
+                                                </td>
+                                            )}
 
-                                            <td className="whitespace-nowrap px-5 py-4 font-bold text-blue-700 dark:text-blue-400">
-                                                {row.transaction_number || "—"}
-                                            </td>
+                                            {visibleColumns.includes("transaction_number") && (
+                                                <td className="whitespace-nowrap px-5 py-4 font-bold text-blue-700 dark:text-blue-400">
+                                                    {row.transaction_number || "—"}
+                                                </td>
+                                            )}
 
-                                            <td className="px-5 py-4 font-semibold">
-                                                {row.customer_name || "—"}
-                                            </td>
+                                            {visibleColumns.includes("customer_name") && (
+                                                <td className="px-5 py-4 font-semibold">
+                                                    {row.customer_name || "—"}
+                                                </td>
+                                            )}
 
-                                            <td className="px-5 py-4">
-                                                {row.warehouse_name || "—"}
-                                            </td>
+                                            {visibleColumns.includes("warehouse_name") && (
+                                                <td className="px-5 py-4">
+                                                    {row.warehouse_name || "—"}
+                                                </td>
+                                            )}
 
-                                            <td className="px-5 py-4">
-                                                {row.source_order_number || "Manual"}
-                                            </td>
+                                            {visibleColumns.includes("source_order_number") && (
+                                                <td className="px-5 py-4">
+                                                    {row.source_order_number || "Manual"}
+                                                </td>
+                                            )}
 
-                                            <td className="px-5 py-4">
-                                                <span
-                                                    className={`rounded-full px-3 py-1 text-xs font-bold ${statusClass(row.status)}`}
-                                                >
-                                                    {row.status || "UNKNOWN"}
-                                                </span>
-                                            </td>
+                                            {visibleColumns.includes("status") && (
+                                                <td className="px-5 py-4">
+                                                    <span
+                                                        className={`rounded-full px-3 py-1 text-xs font-bold ${statusClass(row.status)}`}
+                                                    >
+                                                        {row.status || "UNKNOWN"}
+                                                    </span>
+                                                </td>
+                                            )}
 
-                                            <td className="px-5 py-4">
-                                                {row.document_status || "—"}
-                                            </td>
+                                            {visibleColumns.includes("document_status") && (
+                                                <td className="px-5 py-4">
+                                                    {row.document_status || "—"}
+                                                </td>
+                                            )}
 
-                                            <td className="whitespace-nowrap px-5 py-4 text-right font-bold">
-                                                {money(row.gross_amount, row.currency)}
-                                            </td>
+                                            {visibleColumns.includes("gross_amount") && (
+                                                <td className="whitespace-nowrap px-5 py-4 text-right font-bold">
+                                                    {money(row.gross_amount, row.currency)}
+                                                </td>
+                                            )}
                                         </tr>
                                     ))}
                                 </tbody>
@@ -891,7 +1146,7 @@ useEffect(() => {
                     )}
 
                     {/* Footer */}
-                    <div className="flex flex-col justify-between gap-3 border-t border-slate-200 p-5 text-sm text-slate-500 dark:border-slate-800 dark:text-slate-400 sm:flex-row sm:items-center">
+                    <div className="flex flex-col justify-between gap-3 rounded-b-2xl border-t border-slate-200 p-5 text-sm text-slate-500 dark:border-slate-800 dark:text-slate-400 sm:flex-row sm:items-center">
                         <span>
                             Showing {filtered.length} of{" "}
                             {data.challans.length} challans

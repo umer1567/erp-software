@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   Activity,
   ArrowDownLeft,
@@ -42,6 +49,106 @@ const labelClass =
 
 const cardClass =
   "rounded-2xl border border-slate-200/80 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900";
+
+const LEDGER_COLUMNS = [
+  { key: "date", label: "Trans. Date" },
+  { key: "number", label: "Transaction Number" },
+  { key: "reference", label: "Reference No." },
+  { key: "memo", label: "Memo" },
+  { key: "debit", label: "Debit" },
+  { key: "credit", label: "Credit" },
+  { key: "running", label: "Running Total" },
+];
+
+const LEDGER_COLUMNS_STORAGE_KEY = "customer-ledger.columns";
+
+// =========================================================
+// COLUMN VISIBILITY STORE (localStorage, no setState-in-effect)
+// =========================================================
+
+const columnListeners = new Set();
+
+function subscribeColumns(callback) {
+  columnListeners.add(callback);
+  window.addEventListener("storage", callback);
+
+  return () => {
+    columnListeners.delete(callback);
+    window.removeEventListener("storage", callback);
+  };
+}
+
+function readColumns() {
+  try {
+    return localStorage.getItem(LEDGER_COLUMNS_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeColumns(value) {
+  try {
+    localStorage.setItem(LEDGER_COLUMNS_STORAGE_KEY, JSON.stringify(value));
+  } catch (error) {
+    console.error("Unable to save column preferences:", error);
+  }
+
+  columnListeners.forEach((listener) => listener());
+}
+
+function parseColumns(raw) {
+  let parsed = {};
+
+  if (raw) {
+    try {
+      const result = JSON.parse(raw);
+      if (result && typeof result === "object" && !Array.isArray(result)) {
+        parsed = result;
+      }
+    } catch {
+      parsed = {};
+    }
+  }
+
+  const visible = Object.fromEntries(
+    LEDGER_COLUMNS.map(({ key }) => [key, parsed[key] !== false])
+  );
+
+  // Always keep at least one column visible
+  if (!LEDGER_COLUMNS.some(({ key }) => visible[key])) {
+    visible[LEDGER_COLUMNS[0].key] = true;
+  }
+
+  return visible;
+}
+
+function useLedgerColumns() {
+  const raw = useSyncExternalStore(subscribeColumns, readColumns, () => "");
+
+  const visible = useMemo(() => parseColumns(raw), [raw]);
+
+  const visibleCount = LEDGER_COLUMNS.filter(
+    (column) => visible[column.key]
+  ).length;
+
+  const toggle = useCallback((key) => {
+    const current = parseColumns(readColumns());
+    const count = LEDGER_COLUMNS.filter((c) => current[c.key]).length;
+
+    // The last visible column can't be hidden
+    if (current[key] && count <= 1) return;
+
+    writeColumns({ ...current, [key]: !current[key] });
+  }, []);
+
+  const showAll = useCallback(() => {
+    writeColumns(
+      Object.fromEntries(LEDGER_COLUMNS.map(({ key }) => [key, true]))
+    );
+  }, []);
+
+  return { visible, visibleCount, toggle, showAll };
+}
 
 // =========================================================
 // DATE HELPERS
@@ -175,6 +282,123 @@ function hasViewPermission(permission) {
 }
 
 // =========================================================
+// COLUMN DROPDOWN
+// =========================================================
+
+function ColumnsMenu({ columns, visible, visibleCount, onToggle, onShowAll }) {
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open]);
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((previous) => !previous)}
+        aria-expanded={open}
+        aria-label="Choose visible columns"
+        className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+      >
+        <Activity className="h-4 w-4" />
+        Columns
+        <ChevronDown
+          className={`h-4 w-4 transition-transform ${
+            open ? "rotate-180" : ""
+          }`}
+        />
+      </button>
+
+      {open && (
+        <>
+          {/* Click outside to close */}
+          <button
+            type="button"
+            aria-label="Close column menu"
+            onClick={() => setOpen(false)}
+            className="fixed inset-0 z-[90] cursor-default"
+          />
+
+          <div className="absolute right-0 top-full z-[100] mt-2 w-72 max-w-[calc(100vw-2rem)] rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl ring-1 ring-black/5 dark:border-slate-700 dark:bg-slate-900">
+            <div className="mb-2 flex items-center justify-between gap-2 border-b border-slate-100 pb-3 dark:border-slate-800">
+              <div>
+                <p className="text-sm font-bold text-slate-800 dark:text-white">
+                  Table Columns
+                </p>
+
+                <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                  {visibleCount} of {columns.length} visible
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={onShowAll}
+                className="shrink-0 rounded-lg px-2 py-1.5 text-xs font-semibold text-blue-600 transition hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-500/10"
+              >
+                Show All
+              </button>
+            </div>
+
+            <div className="max-h-64 space-y-1 overflow-y-auto overscroll-contain pr-1">
+              {columns.map((column) => {
+                const checked = Boolean(visible[column.key]);
+                const isLastVisible = checked && visibleCount === 1;
+
+                return (
+                  <label
+                    key={column.key}
+                    aria-disabled={isLastVisible}
+                    title={
+                      isLastVisible
+                        ? "At least one column must stay visible"
+                        : undefined
+                    }
+                    className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${
+                      isLastVisible
+                        ? "cursor-default bg-blue-50 hover:bg-blue-100 dark:bg-blue-500/10 dark:hover:bg-blue-500/20"
+                        : "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => {
+                        if (!isLastVisible) onToggle(column.key);
+                      }}
+                      className="h-4 w-4 cursor-pointer accent-blue-600"
+                    />
+
+                    <span
+                      className={`font-medium ${
+                        isLastVisible
+                          ? "text-blue-700 dark:text-blue-400"
+                          : "text-slate-700 dark:text-slate-200"
+                      }`}
+                    >
+                      {column.label}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// =========================================================
 // SUMMARY CARD
 // =========================================================
 
@@ -274,6 +498,22 @@ export default function CustomerLedgerPage() {
   const [error, setError] = useState("");
   const [hasGeneratedReport, setHasGeneratedReport] = useState(false);
 
+  // Column visibility (must stay above the early returns below)
+  const {
+    visible: cols,
+    visibleCount,
+    toggle: toggleColumn,
+    showAll: showAllColumns,
+  } = useLedgerColumns();
+
+  // Number of visible text columns before Debit (for the totals label)
+  const leadingColumnCount = [
+    cols.date,
+    cols.number,
+    cols.reference,
+    cols.memo,
+  ].filter(Boolean).length;
+
   // Prevent older requests from replacing newer results.
   const reportRequestId = useRef(0);
 
@@ -364,9 +604,7 @@ export default function CustomerLedgerPage() {
         setCustomers(customerList);
       } catch (err) {
         if (err.name !== "AbortError") {
-          setCustomerLoadError(
-            err.message || "Failed to load customers."
-          );
+          setCustomerLoadError(err.message || "Failed to load customers.");
         }
       } finally {
         if (!controller.signal.aborted) {
@@ -443,28 +681,22 @@ export default function CustomerLedgerPage() {
         customerId,
       });
 
-      // Keep the existing report API.
       // The subsidiary filter is sent only if selected, but the API
       // must explicitly support this parameter to filter by subsidiary.
       if (subsidiary) {
         params.set("subsidiary", subsidiary);
       }
 
-      const response = await fetch(
-        `${LEDGER_API}?${params.toString()}`,
-        {
-          cache: "no-store",
-          credentials: "same-origin",
-        }
-      );
+      const response = await fetch(`${LEDGER_API}?${params.toString()}`, {
+        cache: "no-store",
+        credentials: "same-origin",
+      });
 
       const data = await readJson(response);
 
       if (!response.ok) {
         throw new Error(
-          data.message ||
-            data.error ||
-            "Failed to generate customer ledger."
+          data.message || data.error || "Failed to generate customer ledger."
         );
       }
 
@@ -490,9 +722,7 @@ export default function CustomerLedgerPage() {
     } catch (err) {
       if (requestId !== reportRequestId.current) return;
 
-      setError(
-        err.message || "Failed to generate customer ledger."
-      );
+      setError(err.message || "Failed to generate customer ledger.");
 
       resetReportData();
       setHasGeneratedReport(false);
@@ -691,13 +921,8 @@ export default function CustomerLedgerPage() {
                   <option value="">Select a customer</option>
 
                   {customers.map((item) => (
-                    <option
-                      key={item.customer_id}
-                      value={item.customer_id}
-                    >
-                      {item.customer_code
-                        ? `${item.customer_code} - `
-                        : ""}
+                    <option key={item.customer_id} value={item.customer_id}>
+                      {item.customer_code ? `${item.customer_code} - ` : ""}
                       {item.customer_name}
                     </option>
                   ))}
@@ -775,9 +1000,7 @@ export default function CustomerLedgerPage() {
               <button
                 type="submit"
                 disabled={
-                  loadingReport ||
-                  loadingCustomers ||
-                  customers.length === 0
+                  loadingReport || loadingCustomers || customers.length === 0
                 }
                 className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-600/20 transition hover:from-blue-700 hover:to-indigo-700 hover:shadow-blue-600/30 disabled:cursor-not-allowed disabled:opacity-60"
               >
@@ -938,10 +1161,11 @@ export default function CustomerLedgerPage() {
             </div>
           </div>
 
-          {/* TRANSACTION TABLE */}
+          {/* TRANSACTION TABLE
+              (no overflow-hidden, so the Columns dropdown is never clipped) */}
 
-          <div className={`${cardClass} overflow-hidden`}>
-            <div className="flex flex-col gap-3 border-b border-slate-100 p-5 dark:border-slate-800 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+          <div className={`${cardClass} relative z-20`}>
+            <div className="relative z-30 flex flex-col gap-3 rounded-t-2xl border-b border-slate-100 p-5 dark:border-slate-800 sm:flex-row sm:items-center sm:justify-between sm:px-6">
               <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-400">
                   <FileSearch className="h-5 w-5" />
@@ -958,74 +1182,122 @@ export default function CustomerLedgerPage() {
                 </div>
               </div>
 
-              <span className="inline-flex w-fit items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                <span className="h-2 w-2 rounded-full bg-blue-500" />
-                {ledger.length} transaction{ledger.length === 1 ? "" : "s"}
-              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex w-fit items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                  <span className="h-2 w-2 rounded-full bg-blue-500" />
+                  {ledger.length} transaction{ledger.length === 1 ? "" : "s"}
+                </span>
+
+                {/* COLUMNS DROPDOWN */}
+                <ColumnsMenu
+                  columns={LEDGER_COLUMNS}
+                  visible={cols}
+                  visibleCount={visibleCount}
+                  onToggle={toggleColumn}
+                  onShowAll={showAllColumns}
+                />
+              </div>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[1050px] border-collapse text-sm">
+            {/* The scrollbar appears only when the visible columns are wider
+                than the container. */}
+            <div className="w-full overflow-x-auto [scrollbar-width:thin]">
+              <table
+                style={{ minWidth: `${visibleCount * 150}px` }}
+                className="w-full border-collapse text-sm"
+              >
                 <thead>
                   <tr className="bg-slate-50 dark:bg-slate-800/80">
-                    <th className="whitespace-nowrap px-5 py-4 text-left text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                      Trans. Date
-                    </th>
-                    <th className="whitespace-nowrap px-5 py-4 text-left text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                      Transaction Number
-                    </th>
-                    <th className="whitespace-nowrap px-5 py-4 text-left text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                      Reference No.
-                    </th>
-                    <th className="whitespace-nowrap px-5 py-4 text-left text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                      Memo
-                    </th>
-                    <th className="whitespace-nowrap px-5 py-4 text-right text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                      Debit
-                    </th>
-                    <th className="whitespace-nowrap px-5 py-4 text-right text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                      Credit
-                    </th>
-                    <th className="whitespace-nowrap px-5 py-4 text-right text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                      Running Total
-                    </th>
+                    {cols.date && (
+                      <th className="whitespace-nowrap px-5 py-4 text-left text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Trans. Date
+                      </th>
+                    )}
+                    {cols.number && (
+                      <th className="whitespace-nowrap px-5 py-4 text-left text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Transaction Number
+                      </th>
+                    )}
+                    {cols.reference && (
+                      <th className="whitespace-nowrap px-5 py-4 text-left text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Reference No.
+                      </th>
+                    )}
+                    {cols.memo && (
+                      <th className="whitespace-nowrap px-5 py-4 text-left text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Memo
+                      </th>
+                    )}
+                    {cols.debit && (
+                      <th className="whitespace-nowrap px-5 py-4 text-right text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Debit
+                      </th>
+                    )}
+                    {cols.credit && (
+                      <th className="whitespace-nowrap px-5 py-4 text-right text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Credit
+                      </th>
+                    )}
+                    {cols.running && (
+                      <th className="whitespace-nowrap px-5 py-4 text-right text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Running Total
+                      </th>
+                    )}
                   </tr>
                 </thead>
 
                 <tbody>
+                  {/* OPENING BALANCE ROW */}
                   <tr className="border-b border-blue-100 bg-blue-50/70 dark:border-blue-900/40 dark:bg-blue-500/5">
-                    <td className="whitespace-nowrap px-5 py-4 text-slate-600 dark:text-slate-400">
-                      {formatDate(fromDate)}
-                    </td>
+                    {cols.date && (
+                      <td className="whitespace-nowrap px-5 py-4 text-slate-600 dark:text-slate-400">
+                        {formatDate(fromDate)}
+                      </td>
+                    )}
 
-                    <td className="px-5 py-4">
-                      <span className="inline-flex items-center gap-2 font-semibold text-blue-700 dark:text-blue-400">
-                        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-100 dark:bg-blue-500/15">
-                          <Wallet className="h-4 w-4" />
+                    {cols.number && (
+                      <td className="px-5 py-4">
+                        <span className="inline-flex items-center gap-2 whitespace-nowrap font-semibold text-blue-700 dark:text-blue-400">
+                          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-100 dark:bg-blue-500/15">
+                            <Wallet className="h-4 w-4" />
+                          </span>
+                          Opening Balance
                         </span>
-                        Opening Balance
-                      </span>
-                    </td>
+                      </td>
+                    )}
 
-                    <td className="px-5 py-4 text-slate-400">—</td>
+                    {cols.reference && (
+                      <td className="px-5 py-4 text-slate-400">—</td>
+                    )}
 
-                    <td className="px-5 py-4 text-slate-500 dark:text-slate-400">
-                      Balance brought forward
-                    </td>
+                    {cols.memo && (
+                      <td className="whitespace-nowrap px-5 py-4 text-slate-500 dark:text-slate-400">
+                        Balance brought forward
+                      </td>
+                    )}
 
-                    <td className="px-5 py-4 text-right font-medium tabular-nums text-slate-700 dark:text-slate-300">
-                      {openingBalance > 0
-                        ? formatAmount(openingBalance)
-                        : "—"}
-                    </td>
+                    {cols.debit && (
+                      <td className="whitespace-nowrap px-5 py-4 text-right font-medium tabular-nums text-slate-700 dark:text-slate-300">
+                        {openingBalance > 0
+                          ? formatAmount(openingBalance)
+                          : "—"}
+                      </td>
+                    )}
 
-                    <td className="px-5 py-4 text-right text-slate-400">—</td>
+                    {cols.credit && (
+                      <td className="px-5 py-4 text-right text-slate-400">
+                        —
+                      </td>
+                    )}
 
-                    <td className="px-5 py-4 text-right font-bold tabular-nums text-slate-900 dark:text-white">
-                      {formatAmount(openingBalance)}
-                    </td>
+                    {cols.running && (
+                      <td className="whitespace-nowrap px-5 py-4 text-right font-bold tabular-nums text-slate-900 dark:text-white">
+                        {formatAmount(openingBalance)}
+                      </td>
+                    )}
                   </tr>
 
+                  {/* LEDGER ROWS */}
                   {ledger.map((row, index) => {
                     const isInvoice =
                       String(row.transaction_type || "").toUpperCase() ===
@@ -1036,76 +1308,94 @@ export default function CustomerLedgerPage() {
                         key={`${row.transaction_type || "transaction"}-${row.transaction_id ?? index}-${index}`}
                         className="border-b border-slate-100 transition-colors hover:bg-blue-50/40 dark:border-slate-800 dark:hover:bg-slate-800/60"
                       >
-                        <td className="whitespace-nowrap px-5 py-4 text-slate-600 dark:text-slate-400">
-                          {formatDate(row.transaction_date)}
-                        </td>
+                        {cols.date && (
+                          <td className="whitespace-nowrap px-5 py-4 text-slate-600 dark:text-slate-400">
+                            {formatDate(row.transaction_date)}
+                          </td>
+                        )}
 
-                        <td className="px-5 py-4">
-                          <div className="flex items-center gap-2.5">
-                            <span
-                              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
-                                isInvoice
-                                  ? "bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-400"
-                                  : "bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400"
-                              }`}
-                            >
-                              {isInvoice ? (
-                                <FileText className="h-4 w-4" />
-                              ) : (
-                                <CircleDollarSign className="h-4 w-4" />
-                              )}
-                            </span>
-
-                            <div className="min-w-0">
-                              <p className="whitespace-nowrap font-semibold text-slate-800 dark:text-slate-200">
-                                {row.transaction_number || "—"}
-                              </p>
-
+                        {cols.number && (
+                          <td className="px-5 py-4">
+                            <div className="flex items-center gap-2.5">
                               <span
-                                className={`mt-1 inline-flex rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+                                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
                                   isInvoice
-                                    ? "bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-400"
-                                    : "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400"
+                                    ? "bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-400"
+                                    : "bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400"
                                 }`}
                               >
-                                {row.transaction_type || "Transaction"}
+                                {isInvoice ? (
+                                  <FileText className="h-4 w-4" />
+                                ) : (
+                                  <CircleDollarSign className="h-4 w-4" />
+                                )}
                               </span>
+
+                              <div className="min-w-0">
+                                <p className="whitespace-nowrap font-semibold text-slate-800 dark:text-slate-200">
+                                  {row.transaction_number || "—"}
+                                </p>
+
+                                <span
+                                  className={`mt-1 inline-flex rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+                                    isInvoice
+                                      ? "bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-400"
+                                      : "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400"
+                                  }`}
+                                >
+                                  {row.transaction_type || "Transaction"}
+                                </span>
+                              </div>
                             </div>
-                          </div>
-                        </td>
+                          </td>
+                        )}
 
-                        <td className="px-5 py-4 text-slate-500 dark:text-slate-400">
-                          {row.reference_no || "—"}
-                        </td>
+                        {cols.reference && (
+                          <td className="px-5 py-4 text-slate-500 dark:text-slate-400">
+                            {row.reference_no || "—"}
+                          </td>
+                        )}
 
-                        <td className="max-w-[260px] px-5 py-4 text-slate-600 dark:text-slate-400">
-                          <span className="line-clamp-2">
-                            {row.memo || "—"}
-                          </span>
-                        </td>
+                        {cols.memo && (
+                          <td className="max-w-[260px] px-5 py-4 text-slate-600 dark:text-slate-400">
+                            <span className="line-clamp-2">
+                              {row.memo || "—"}
+                            </span>
+                          </td>
+                        )}
 
-                        <td className="whitespace-nowrap px-5 py-4 text-right font-medium tabular-nums text-slate-700 dark:text-slate-300">
-                          {toNumber(row.debit) > 0
-                            ? formatAmount(row.debit)
-                            : "—"}
-                        </td>
+                        {cols.debit && (
+                          <td className="whitespace-nowrap px-5 py-4 text-right font-medium tabular-nums text-slate-700 dark:text-slate-300">
+                            {toNumber(row.debit) > 0
+                              ? formatAmount(row.debit)
+                              : "—"}
+                          </td>
+                        )}
 
-                        <td className="whitespace-nowrap px-5 py-4 text-right font-medium tabular-nums text-slate-700 dark:text-slate-300">
-                          {toNumber(row.credit) > 0
-                            ? formatAmount(row.credit)
-                            : "—"}
-                        </td>
+                        {cols.credit && (
+                          <td className="whitespace-nowrap px-5 py-4 text-right font-medium tabular-nums text-slate-700 dark:text-slate-300">
+                            {toNumber(row.credit) > 0
+                              ? formatAmount(row.credit)
+                              : "—"}
+                          </td>
+                        )}
 
-                        <td className="whitespace-nowrap px-5 py-4 text-right font-bold tabular-nums text-slate-900 dark:text-white">
-                          {formatAmount(row.running_total)}
-                        </td>
+                        {cols.running && (
+                          <td className="whitespace-nowrap px-5 py-4 text-right font-bold tabular-nums text-slate-900 dark:text-white">
+                            {formatAmount(row.running_total)}
+                          </td>
+                        )}
                       </tr>
                     );
                   })}
 
+                  {/* EMPTY STATE */}
                   {ledger.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="px-5 py-14 text-center">
+                      <td
+                        colSpan={visibleCount}
+                        className="px-5 py-14 text-center"
+                      >
                         <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 dark:bg-slate-800">
                           <FileSearch className="h-7 w-7 text-slate-400" />
                         </div>
@@ -1125,30 +1415,38 @@ export default function CustomerLedgerPage() {
 
                 <tfoot>
                   <tr className="border-t-2 border-slate-200 bg-slate-100/80 dark:border-slate-700 dark:bg-slate-800">
-                    <td
-                      colSpan={4}
-                      className="px-5 py-5 text-right font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200"
-                    >
-                      Period Total
-                    </td>
+                    {leadingColumnCount > 0 && (
+                      <td
+                        colSpan={leadingColumnCount}
+                        className="px-5 py-5 text-right font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200"
+                      >
+                        Period Total
+                      </td>
+                    )}
 
-                    <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-emerald-700 dark:text-emerald-400">
-                      {formatAmount(totalDebit)}
-                    </td>
+                    {cols.debit && (
+                      <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-emerald-700 dark:text-emerald-400">
+                        {formatAmount(totalDebit)}
+                      </td>
+                    )}
 
-                    <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-rose-700 dark:text-rose-400">
-                      {formatAmount(totalCredit)}
-                    </td>
+                    {cols.credit && (
+                      <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-rose-700 dark:text-rose-400">
+                        {formatAmount(totalCredit)}
+                      </td>
+                    )}
 
-                    <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-slate-900 dark:text-white">
-                      {formatAmount(closingBalance)}
-                    </td>
+                    {cols.running && (
+                      <td className="whitespace-nowrap px-5 py-5 text-right font-bold tabular-nums text-slate-900 dark:text-white">
+                        {formatAmount(closingBalance)}
+                      </td>
+                    )}
                   </tr>
                 </tfoot>
               </table>
             </div>
 
-            <div className="flex flex-col gap-2 border-t border-slate-100 px-5 py-4 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+            <div className="flex flex-col gap-2 rounded-b-2xl border-t border-slate-100 px-5 py-4 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400 sm:flex-row sm:items-center sm:justify-between sm:px-6">
               <span>
                 Showing {ledger.length} ledger transaction
                 {ledger.length === 1 ? "" : "s"}
@@ -1165,70 +1463,64 @@ export default function CustomerLedgerPage() {
 
       {/* INITIAL EMPTY STATE */}
 
-      {!customer &&
-        !loadingReport &&
-        !error &&
-        !hasGeneratedReport && (
-          <section className={`${cardClass} overflow-hidden`}>
-            <div className="flex flex-col items-center px-6 py-14 text-center sm:py-16">
-              <div className="relative flex h-20 w-20 items-center justify-center rounded-3xl bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-blue-500/10 dark:to-indigo-500/10">
-                <ClipboardList className="h-10 w-10 text-blue-600 dark:text-blue-400" />
+      {!customer && !loadingReport && !error && !hasGeneratedReport && (
+        <section className={`${cardClass} overflow-hidden`}>
+          <div className="flex flex-col items-center px-6 py-14 text-center sm:py-16">
+            <div className="relative flex h-20 w-20 items-center justify-center rounded-3xl bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-blue-500/10 dark:to-indigo-500/10">
+              <ClipboardList className="h-10 w-10 text-blue-600 dark:text-blue-400" />
 
-                <span className="absolute -right-2 -top-2 flex h-7 w-7 items-center justify-center rounded-full border-4 border-white bg-emerald-500 text-white dark:border-slate-900">
-                  <Search className="h-3 w-3" />
-                </span>
-              </div>
-
-              <h3 className="mt-6 text-xl font-bold text-slate-900 dark:text-white">
-                Your customer ledger starts here
-              </h3>
-
-              <p className="mt-2 max-w-md text-sm leading-6 text-slate-500 dark:text-slate-400">
-                Select a customer and choose the reporting dates above.
-                Generate a report to view the opening balance, transactions,
-                debit, credit and closing balance.
-              </p>
-
-              <div className="mt-6 flex flex-wrap justify-center gap-2">
-                <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                  Opening balance
-                </span>
-
-                <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                  Debit &amp; credit
-                </span>
-
-                <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                  Running balance
-                </span>
-              </div>
+              <span className="absolute -right-2 -top-2 flex h-7 w-7 items-center justify-center rounded-full border-4 border-white bg-emerald-500 text-white dark:border-slate-900">
+                <Search className="h-3 w-3" />
+              </span>
             </div>
-          </section>
-        )}
+
+            <h3 className="mt-6 text-xl font-bold text-slate-900 dark:text-white">
+              Your customer ledger starts here
+            </h3>
+
+            <p className="mt-2 max-w-md text-sm leading-6 text-slate-500 dark:text-slate-400">
+              Select a customer and choose the reporting dates above. Generate
+              a report to view the opening balance, transactions, debit,
+              credit and closing balance.
+            </p>
+
+            <div className="mt-6 flex flex-wrap justify-center gap-2">
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                Opening balance
+              </span>
+
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                Debit &amp; credit
+              </span>
+
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                Running balance
+              </span>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* EMPTY RESULT AFTER REPORT */}
 
-      {!customer &&
-        !loadingReport &&
-        hasGeneratedReport &&
-        !error && (
-          <section
-            className={`${cardClass} flex flex-col items-center px-6 py-12 text-center`}
-          >
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-50 dark:bg-amber-500/10">
-              <FileSearch className="h-7 w-7 text-amber-600 dark:text-amber-400" />
-            </div>
+      {!customer && !loadingReport && hasGeneratedReport && !error && (
+        <section
+          className={`${cardClass} flex flex-col items-center px-6 py-12 text-center`}
+        >
+          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-50 dark:bg-amber-500/10">
+            <FileSearch className="h-7 w-7 text-amber-600 dark:text-amber-400" />
+          </div>
 
-            <h3 className="mt-4 font-bold text-slate-900 dark:text-white">
-              No report data available
-            </h3>
+          <h3 className="mt-4 font-bold text-slate-900 dark:text-white">
+            No report data available
+          </h3>
 
-            <p className="mt-2 max-w-md text-sm text-slate-500 dark:text-slate-400">
-              The request completed, but no customer information was returned.
-              Please verify the customer and try again.
-            </p>
-          </section>
-        )}
+          <p className="mt-2 max-w-md text-sm text-slate-500 dark:text-slate-400">
+            The request completed, but no customer information was returned.
+            Please verify the customer and try again.
+          </p>
+        </section>
+      )}
     </div>
   );
 }

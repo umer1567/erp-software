@@ -1,3 +1,4 @@
+
 import { NextResponse } from "next/server";
 import { getActiveUserFromToken } from "@/lib/auth";
 
@@ -12,19 +13,13 @@ export async function proxy(request) {
     const user = await getActiveUserFromToken(token);
 
     if (!user) {
+      // Do not delete the cookie here.
+      // An older request could otherwise delete a newly issued login cookie.
       const response = NextResponse.redirect(
         new URL("/login?reason=session_expired", request.url)
       );
 
-      response.cookies.set("erp_token", "", {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "lax",
-        expires: new Date(0),
-        maxAge: 0,
-        path: "/",
-      });
-
+      response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
       return response;
     }
 
@@ -32,20 +27,12 @@ export async function proxy(request) {
   } catch (error) {
     console.error("Dashboard session validation error:", error);
 
-    // Fail closed if the database cannot validate the session.
+    // Fail closed, but do not clear the authentication cookie here.
     const response = NextResponse.redirect(
       new URL("/login?reason=session_validation_failed", request.url)
     );
 
-    response.cookies.set("erp_token", "", {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      expires: new Date(0),
-      maxAge: 0,
-      path: "/",
-    });
-
+    response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
     return response;
   }
 }

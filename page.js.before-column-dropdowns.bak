@@ -1,0 +1,3027 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+const inputClass =
+    "w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100";
+const labelClass =
+    "mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400";
+
+function today() {
+    const date = new Date();
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function money(value, currency = "PKR") {
+    const number = Number(value || 0);
+
+    try {
+        return new Intl.NumberFormat("en-PK", {
+            style: "currency",
+            currency,
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        }).format(Number.isFinite(number) ? number : 0);
+    } catch {
+        return `${currency} ${Number.isFinite(number) ? number.toFixed(2) : "0.00"}`;
+    }
+}
+
+function dateLabel(value) {
+    if (!value) return "—";
+
+    const date = new Date(`${String(value).slice(0, 10)}T00:00:00`);
+
+    if (Number.isNaN(date.getTime())) return String(value);
+
+    return date.toLocaleDateString("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+    }).toUpperCase();
+}
+
+function toBoolean(value) {
+    return (
+        value === true ||
+        value === 1 ||
+        value === "1" ||
+        String(value).toLowerCase() === "true"
+    );
+}
+
+function normalizePermissions(permission) {
+    return {
+        canView: toBoolean(permission?.can_view ?? permission?.canView),
+        canCreate: toBoolean(permission?.can_create ?? permission?.canCreate),
+        canUpdate: toBoolean(permission?.can_update ?? permission?.canUpdate),
+        canDelete: toBoolean(permission?.can_delete ?? permission?.canDelete),
+    };
+}
+
+function newLine(products = []) {
+    const product = products[0];
+
+    return {
+        product_id: product?.product_id ? String(product.product_id) : "",
+        item_name: product?.product_name || "",
+        item_description: product?.description || "",
+        item_balance: 0,
+        uom: product?.sales_unit || product?.unit || "",
+        quantity: 1,
+        retail_price: Number(product?.sale_price || 0),
+        discount_percent: 0,
+        unit_price: Number(product?.sale_price || 0),
+        amount: Number(product?.sale_price || 0),
+        tax_code: "",
+        tax_rate: 0,
+        tax_amount: 0,
+        gross_amount: Number(product?.sale_price || 0),
+        memo: "",
+    };
+}
+
+function blankForm(products = [], company = null) {
+    return {
+        order_id: null,
+        order_number: "TO BE GENERATED",
+        source_quotation_id: "",
+        transaction_date: today(),
+        status: "APPROVED",
+        customer_id: "",
+        warehouse_id: "",
+        department: "",
+        project: "",
+        order_class: "",
+        sales_rep: "",
+        payment_term: "",
+        memo: "",
+        terms_conditions: "",
+        currency: company?.currency || "PKR",
+        exchange_rate: 1,
+        customer_credit_limit: 0,
+        customer_balance: 0,
+        available_credit_limit: 0,
+        items: [newLine(products)],
+    };
+}
+
+function normalizeOrderItem(item) {
+    const retailPrice = Number(item.retail_price ?? item.unit_price ?? 0);
+    const discount = Number(item.discount_percent || 0);
+    const quantity = Number(item.quantity || 0);
+    const unitPrice = Number(
+        item.unit_price ?? retailPrice * (1 - discount / 100)
+    );
+    const amount = Number(item.amount ?? quantity * unitPrice);
+    const taxAmount = Number(item.tax_amount || 0);
+
+    return {
+        product_id: item.product_id ? String(item.product_id) : "",
+        item_name: item.item_name || "",
+        item_description: item.item_description || "",
+        item_balance: Number(item.item_balance || 0),
+        uom: item.uom || "",
+        quantity,
+        retail_price: retailPrice,
+        discount_percent: discount,
+        unit_price: unitPrice,
+        amount,
+        tax_code: item.tax_code || "",
+        tax_rate: Number(item.tax_rate || 0),
+        tax_amount: taxAmount,
+        gross_amount: Number(item.gross_amount ?? amount + taxAmount),
+        memo: item.memo || "",
+    };
+}
+
+function Button({
+    children,
+    onClick,
+    variant = "secondary",
+    disabled = false,
+    title,
+    type = "button",
+}) {
+    const styles = {
+        primary:
+            "bg-blue-600 text-white shadow-sm hover:bg-blue-700 focus:ring-blue-500/30",
+        secondary:
+            "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800",
+        success:
+            "bg-emerald-600 text-white hover:bg-emerald-700 focus:ring-emerald-500/30",
+        danger:
+            "border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300",
+    };
+
+    return (
+        <button
+            type={type}
+            title={title}
+            disabled={disabled}
+            onClick={onClick}
+            className={`inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition focus:outline-none focus:ring-4 disabled:cursor-not-allowed disabled:opacity-50 ${styles[variant]}`}
+        >
+            {children}
+        </button>
+    );
+}
+
+function Field({ label, children, className = "" }) {
+    return (
+        <div className={className}>
+            <label className={labelClass}>{label}</label>
+            {children}
+        </div>
+    );
+}
+
+function Section({ title, description, children, action }) {
+    return (
+        <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4 dark:border-slate-800">
+                <div>
+                    <h3 className="font-bold text-slate-900 dark:text-slate-100">
+                        {title}
+                    </h3>
+
+                    {description ? (
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                            {description}
+                        </p>
+                    ) : null}
+                </div>
+
+                {action}
+            </div>
+
+            <div className="p-5">{children}</div>
+        </section>
+    );
+}
+
+function StatusBadge({ status }) {
+    const value = String(status || "DRAFT").toUpperCase();
+
+    const styles =
+        value === "APPROVED"
+            ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+            : value === "CANCELLED"
+              ? "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300"
+              : "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300";
+
+    return (
+        <span
+            className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold ${styles}`}
+        >
+            {value}
+        </span>
+    );
+}
+
+function SummaryCard({ label, value, accent = "blue" }) {
+    const accents = {
+        blue: "from-blue-600 to-indigo-600",
+        green: "from-emerald-600 to-teal-600",
+        purple: "from-violet-600 to-fuchsia-600",
+    };
+
+    return (
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
+            <div className={`h-1 bg-gradient-to-r ${accents[accent]}`} />
+
+            <div className="p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    {label}
+                </p>
+
+                <p className="mt-2 break-words text-xl font-extrabold text-slate-900 dark:text-white">
+                    {value}
+                </p>
+            </div>
+        </div>
+    );
+}
+
+function AccessDenied({ message }) {
+    return (
+        <main className="flex min-h-[65vh] items-center justify-center bg-slate-50 p-6 dark:bg-slate-900">
+            <div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-sm dark:border-slate-800 dark:bg-slate-950">
+                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-red-100 text-3xl dark:bg-red-950">
+                    🔒
+                </div>
+
+                <h2 className="mt-5 text-2xl font-black text-slate-900 dark:text-white">
+                    Access Restricted
+                </h2>
+
+                <p className="mt-3 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                    {message ||
+                        "You do not have View permission for Sales Orders. Please contact your administrator."}
+                </p>
+
+                <p className="mt-5 text-xs text-slate-400">
+                    Permission required: sales_orders → View
+                </p>
+            </div>
+        </main>
+    );
+}
+
+export default function SalesOrdersPage() {
+        const HISTORY_COLUMNS = [
+        { key: "edit", label: "Edit", fixed: true },
+        { key: "view", label: "View", fixed: true },
+        { key: "report", label: "Report", fixed: true },
+        { key: "customer", label: "Customer" },
+        { key: "transactionNumber", label: "Transaction Number" },
+        { key: "locationName", label: "Location Name" },
+        { key: "status", label: "Status" },
+        { key: "trandate", label: "Trandate" },
+        { key: "transactionType", label: "Transaction Type" },
+        { key: "createdFrom", label: "Created From" },
+        { key: "documentStatus", label: "Document Status" },
+        { key: "grossAmount", label: "Gross Amount" },
+    ];
+
+    const LINE_COLUMNS = [
+        { key: "rowNumber", label: "#" },
+        { key: "itemName", label: "Item Name" },
+        { key: "itemDescription", label: "Item Description" },
+        { key: "itemBalance", label: "Item Balance" },
+        { key: "uom", label: "UOM" },
+        { key: "quantity", label: "Quantity" },
+        { key: "retailPrice", label: "Retail Price" },
+        { key: "discountPercent", label: "Discount %" },
+        { key: "unitPrice", label: "Unit Price" },
+        { key: "amount", label: "Amount" },
+        { key: "taxCode", label: "Tax Code" },
+        { key: "taxRate", label: "Tax %" },
+        { key: "taxAmount", label: "Tax Amount" },
+        { key: "grossAmount", label: "Gross Amount" },
+        { key: "memo", label: "Memo" },
+        { key: "action", label: "Action", fixed: true },
+    ];
+    const [orders, setOrders] = useState([]);
+    const [customers, setCustomers] = useState([]);
+    const [products, setProducts] = useState([]);
+    const [warehouses, setWarehouses] = useState([]);
+    const [company, setCompany] = useState(null);
+
+    const [permissions, setPermissions] = useState({
+        canView: false,
+        canCreate: false,
+        canUpdate: false,
+        canDelete: false,
+    });
+
+    const [permissionsLoading, setPermissionsLoading] = useState(true);
+    const [permissionsError, setPermissionsError] = useState("");
+
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [search, setSearch] = useState("");
+    const [statusFilter, setStatusFilter] = useState("ALL");
+    const [view, setView] = useState("list");
+    const [mode, setMode] = useState("edit");
+    const [activeTab, setActiveTab] = useState("lines");
+    const [form, setForm] = useState(null);
+    const [message, setMessage] = useState("");
+    const [error, setError] = useState("");
+
+        // HISTORY COLUMN VISIBILITY
+    const historyColumnsRef = useRef(null);
+    const [historyColumnsOpen, setHistoryColumnsOpen] = useState(false);
+
+    const [historyVisibleColumns, setHistoryVisibleColumns] = useState(
+        Object.fromEntries(HISTORY_COLUMNS.map((column) => [column.key, true]))
+    );
+
+    // TRANSACTION LINE COLUMN VISIBILITY
+    const lineColumnsRef = useRef(null);
+    const [lineColumnsOpen, setLineColumnsOpen] = useState(false);
+
+    const [lineVisibleColumns, setLineVisibleColumns] = useState(
+        Object.fromEntries(LINE_COLUMNS.map((column) => [column.key, true]))
+    );
+
+    function toggleHistoryColumn(key) {
+        const column = HISTORY_COLUMNS.find((item) => item.key === key);
+        if (!column || column.fixed) return;
+
+        setHistoryVisibleColumns((previous) => {
+            const visibleCount = HISTORY_COLUMNS.filter(
+                (item) => !item.fixed && previous[item.key]
+            ).length;
+
+            if (previous[key] && visibleCount <= 1) return previous;
+
+            return { ...previous, [key]: !previous[key] };
+        });
+    }
+
+    function toggleLineColumn(key) {
+        const column = LINE_COLUMNS.find((item) => item.key === key);
+        if (!column || column.fixed) return;
+
+        setLineVisibleColumns((previous) => {
+            const visibleCount = LINE_COLUMNS.filter(
+                (item) => !item.fixed && previous[item.key]
+            ).length;
+
+            if (previous[key] && visibleCount <= 1) return previous;
+
+            return { ...previous, [key]: !previous[key] };
+        });
+    }
+
+    function showAllHistoryColumns() {
+        setHistoryVisibleColumns(
+            Object.fromEntries(
+                HISTORY_COLUMNS.map((column) => [column.key, true])
+            )
+        );
+    }
+
+    function showAllLineColumns() {
+        setLineVisibleColumns(
+            Object.fromEntries(
+                LINE_COLUMNS.map((column) => [column.key, true])
+            )
+        );
+    }
+
+        useEffect(() => {
+        function handleColumnDropdownOutsideClick(event) {
+            if (
+                historyColumnsRef.current &&
+                !historyColumnsRef.current.contains(event.target)
+            ) {
+                setHistoryColumnsOpen(false);
+            }
+
+            if (
+                lineColumnsRef.current &&
+                !lineColumnsRef.current.contains(event.target)
+            ) {
+                setLineColumnsOpen(false);
+            }
+        }
+
+        document.addEventListener(
+            "mousedown",
+            handleColumnDropdownOutsideClick
+        );
+
+        document.addEventListener(
+            "touchstart",
+            handleColumnDropdownOutsideClick
+        );
+
+        return () => {
+            document.removeEventListener(
+                "mousedown",
+                handleColumnDropdownOutsideClick
+            );
+
+            document.removeEventListener(
+                "touchstart",
+                handleColumnDropdownOutsideClick
+            );
+        };
+    }, []);
+
+    const currency = form?.currency || company?.currency || "PKR";
+    const isReadOnly = mode === "view";
+
+    const notifyError = useCallback((text) => {
+        setError(text);
+        setMessage("");
+    }, []);
+
+    const notifySuccess = useCallback((text) => {
+        setMessage(text);
+        setError("");
+    }, []);
+
+    // ---------------------------------------------------------
+    // USER RIGHTS: LOAD SALES ORDERS PERMISSIONS
+    // Permission key must be: sales_orders
+    // ---------------------------------------------------------
+
+    useEffect(() => {
+        let active = true;
+        let controller = null;
+
+        async function loadUserPermissions() {
+            if (controller) {
+                controller.abort();
+            }
+
+            const requestController = new AbortController();
+            controller = requestController;
+
+            setPermissionsLoading(true);
+            setPermissionsError("");
+
+            try {
+                const response = await fetch("/api/permissions/current", {
+                    method: "GET",
+                    credentials: "same-origin",
+                    cache: "no-store",
+                    signal: requestController.signal,
+                    headers: {
+                        Accept: "application/json",
+                    },
+                });
+
+                const data = await response.json();
+
+                if (!response.ok || !Array.isArray(data.permissions)) {
+                    throw new Error(
+                        data.message || "Unable to load your user rights."
+                    );
+                }
+
+                const salesOrderPermission = data.permissions.find(
+                    (permission) =>
+                        String(permission.permission_key || "")
+                            .trim()
+                            .toLowerCase() === "sales_orders"
+                );
+
+                const nextPermissions = normalizePermissions(
+                    salesOrderPermission
+                );
+
+                if (active && !requestController.signal.aborted) {
+                    setPermissions(nextPermissions);
+                }
+            } catch (err) {
+                if (err.name !== "AbortError" && active) {
+                    setPermissions({
+                        canView: false,
+                        canCreate: false,
+                        canUpdate: false,
+                        canDelete: false,
+                    });
+
+                    setPermissionsError(
+                        err.message || "Unable to verify your user rights."
+                    );
+                }
+            } finally {
+                if (active && !requestController.signal.aborted) {
+                    setPermissionsLoading(false);
+                }
+            }
+        }
+
+        loadUserPermissions();
+
+        // User Rights page should dispatch this event after saving changes.
+        const handlePermissionsUpdated = () => {
+            loadUserPermissions();
+        };
+
+        window.addEventListener(
+            "erp-permissions-updated",
+            handlePermissionsUpdated
+        );
+
+        return () => {
+            active = false;
+
+            if (controller) {
+                controller.abort();
+            }
+
+            window.removeEventListener(
+                "erp-permissions-updated",
+                handlePermissionsUpdated
+            );
+        };
+    }, []);
+
+    // ---------------------------------------------------------
+    // LOAD SALES ORDER DATA
+    // Data is loaded only after View permission is confirmed.
+    // ---------------------------------------------------------
+
+    const loadData = useCallback(async () => {
+        if (!permissions.canView) return;
+
+        setLoading(true);
+        setError("");
+
+        try {
+            const response = await fetch("/api/sales-orders", {
+                method: "GET",
+                credentials: "same-origin",
+                cache: "no-store",
+                headers: {
+                    Accept: "application/json",
+                },
+            });
+
+            const data = await response.json();
+
+            if (!response.ok || !data.success) {
+                throw new Error(
+                    data.message || "Unable to load Sales Orders."
+                );
+            }
+
+            setOrders(data.orders || []);
+            setCustomers(data.customers || []);
+            setProducts(data.products || []);
+            setWarehouses(data.warehouses || []);
+            setCompany(data.company || null);
+        } catch (err) {
+            notifyError(err.message || "Unable to load Sales Orders.");
+        } finally {
+            setLoading(false);
+        }
+    }, [permissions.canView, notifyError]);
+
+    useEffect(() => {
+  if (permissionsLoading || !permissions.canView) return;
+
+  const timer = setTimeout(() => {
+    loadData();
+  }, 0);
+
+  return () => clearTimeout(timer);
+}, [permissionsLoading, permissions.canView, loadData]);
+
+    // ---------------------------------------------------------
+    // TOTALS
+    // ---------------------------------------------------------
+
+    const totals = useMemo(() => {
+        const items = form?.items || [];
+
+        let subtotal = 0;
+        let taxAmount = 0;
+
+        for (const item of items) {
+            const quantity = Number(item.quantity || 0);
+            const retailPrice = Number(item.retail_price || 0);
+            const discount = Number(item.discount_percent || 0);
+            const taxRate = Number(item.tax_rate || 0);
+
+            const unitPrice = retailPrice * (1 - discount / 100);
+            const amount = quantity * unitPrice;
+            const tax = (amount * taxRate) / 100;
+
+            subtotal += amount;
+            taxAmount += tax;
+        }
+
+        subtotal = Math.round(subtotal * 100) / 100;
+        taxAmount = Math.round(taxAmount * 100) / 100;
+
+        return {
+            subtotal,
+            taxAmount,
+            grossAmount: Math.round((subtotal + taxAmount) * 100) / 100,
+        };
+    }, [form?.items]);
+
+    // ---------------------------------------------------------
+    // FILTER ORDERS
+    // ---------------------------------------------------------
+
+    const filteredOrders = useMemo(() => {
+        const term = search.trim().toLowerCase();
+
+        return orders.filter((order) => {
+            const statusMatches =
+                statusFilter === "ALL" ||
+                String(order.status || "").toUpperCase() === statusFilter;
+
+            const text = [
+                order.order_number,
+                order.customer_name,
+                order.warehouse_name,
+                order.status,
+                order.document_status,
+                order.source_quotation_number,
+                order.department,
+                order.project,
+                order.sales_rep,
+            ]
+                .filter(Boolean)
+                .join(" ")
+                .toLowerCase();
+
+            return statusMatches && (!term || text.includes(term));
+        });
+    }, [orders, search, statusFilter]);
+
+    // ---------------------------------------------------------
+    // FORM HANDLERS
+    // ---------------------------------------------------------
+
+    function updateForm(field, value) {
+        if (isReadOnly || !permissions.canUpdate && form?.order_id) return;
+
+        setForm((current) => ({
+            ...current,
+            [field]: value,
+        }));
+    }
+
+    function updateLine(index, field, value) {
+        if (isReadOnly) return;
+
+        if (form?.order_id && !permissions.canUpdate) {
+            notifyError("You do not have permission to edit this Sales Order.");
+            return;
+        }
+
+        setForm((current) => {
+            const items = [...current.items];
+            const item = { ...items[index], [field]: value };
+
+            if (field === "product_id") {
+                const product = products.find(
+                    (entry) => String(entry.product_id) === String(value)
+                );
+
+                if (product) {
+                    item.item_name = product.product_name || "";
+                    item.item_description = product.description || "";
+                    item.uom = product.sales_unit || product.unit || "";
+                    item.retail_price = Number(product.sale_price || 0);
+                    item.unit_price = Number(product.sale_price || 0);
+                }
+            }
+
+            const quantity = Number(item.quantity || 0);
+            const retailPrice = Number(item.retail_price || 0);
+            const discount = Number(item.discount_percent || 0);
+            const taxRate = Number(item.tax_rate || 0);
+
+            item.unit_price = retailPrice * (1 - discount / 100);
+            item.amount = quantity * item.unit_price;
+            item.tax_amount = (item.amount * taxRate) / 100;
+            item.gross_amount = item.amount + item.tax_amount;
+
+            items[index] = item;
+
+            return {
+                ...current,
+                items,
+            };
+        });
+    }
+
+    function addLine() {
+        if (isReadOnly) return;
+
+        if (form?.order_id && !permissions.canUpdate) {
+            notifyError("You do not have permission to edit this Sales Order.");
+            return;
+        }
+
+        if (!form?.order_id && !permissions.canCreate) {
+            notifyError("You do not have permission to create Sales Orders.");
+            return;
+        }
+
+        setForm((current) => ({
+            ...current,
+            items: [...current.items, newLine(products)],
+        }));
+    }
+
+    function removeLine(index) {
+        if (isReadOnly) return;
+
+        if (form?.order_id && !permissions.canUpdate) {
+            notifyError("You do not have permission to edit this Sales Order.");
+            return;
+        }
+
+        setForm((current) => ({
+            ...current,
+            items:
+                current.items.length <= 1
+                    ? [newLine(products)]
+                    : current.items.filter((_, i) => i !== index),
+        }));
+    }
+
+    // ---------------------------------------------------------
+    // CREATE ORDER
+    // ---------------------------------------------------------
+
+    function openCreate() {
+        if (!permissions.canCreate) {
+            notifyError("You do not have permission to create Sales Orders.");
+            return;
+        }
+
+        setForm(blankForm(products, company));
+        setMode("edit");
+        setActiveTab("lines");
+        setView("form");
+        setMessage("");
+        setError("");
+    }
+
+    // ---------------------------------------------------------
+    // OPEN ORDER
+    // ---------------------------------------------------------
+
+    async function openOrder(order, nextMode = "view") {
+        if (!permissions.canView) {
+            notifyError("You do not have permission to view Sales Orders.");
+            return null;
+        }
+
+        if (nextMode === "edit" && !permissions.canUpdate) {
+            notifyError("You do not have permission to edit Sales Orders.");
+            return null;
+        }
+
+        setLoading(true);
+        setError("");
+        setMessage("");
+
+        try {
+            const response = await fetch(
+                `/api/sales-orders/${order.order_id}`,
+                {
+                    method: "GET",
+                    credentials: "same-origin",
+                    cache: "no-store",
+                    headers: {
+                        Accept: "application/json",
+                    },
+                }
+            );
+
+            const data = await response.json();
+
+            if (!response.ok || !data.success) {
+                throw new Error(
+                    data.message || "Unable to open the Sales Order."
+                );
+            }
+
+            const record = data.order;
+
+            const normalizedForm = {
+                ...record,
+                order_id: record.order_id,
+                order_number: record.order_number,
+                transaction_date: String(
+                    record.transaction_date || today()
+                ).slice(0, 10),
+                customer_id: record.customer_id
+                    ? String(record.customer_id)
+                    : "",
+                warehouse_id: record.warehouse_id
+                    ? String(record.warehouse_id)
+                    : "",
+                currency: record.currency || company?.currency || "PKR",
+                exchange_rate: Number(record.exchange_rate || 1),
+                items: (data.items || []).map(normalizeOrderItem),
+            };
+
+            setForm(normalizedForm);
+            setMode(nextMode);
+            setActiveTab("lines");
+            setView("form");
+
+            return normalizedForm;
+        } catch (err) {
+            notifyError(err.message || "Unable to open the Sales Order.");
+            return null;
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    // ---------------------------------------------------------
+    // BACK TO LIST
+    // ---------------------------------------------------------
+
+    function goBack() {
+        setView("list");
+        setForm(null);
+        setMessage("");
+        setError("");
+        loadData();
+    }
+
+    // ---------------------------------------------------------
+    // SAVE ORDER
+    // ---------------------------------------------------------
+
+    async function saveOrder() {
+        if (!form) return;
+
+        if (mode === "view") {
+            if (!permissions.canUpdate) {
+                notifyError("You do not have permission to edit Sales Orders.");
+                return;
+            }
+
+            setMode("edit");
+            return;
+        }
+
+        const isExistingOrder = Boolean(form.order_id);
+
+        if (isExistingOrder && !permissions.canUpdate) {
+            notifyError("You do not have permission to update Sales Orders.");
+            return;
+        }
+
+        if (!isExistingOrder && !permissions.canCreate) {
+            notifyError("You do not have permission to create Sales Orders.");
+            return;
+        }
+
+        if (!form.customer_id) {
+            notifyError("Please select a customer.");
+            return;
+        }
+
+        if (!form.warehouse_id) {
+            notifyError("Please select a From Location.");
+            return;
+        }
+
+        if (
+            !form.items?.length ||
+            !form.items.some((item) => String(item.item_name || "").trim())
+        ) {
+            notifyError("Add at least one transaction line.");
+            return;
+        }
+
+        for (const [index, item] of form.items.entries()) {
+            if (!String(item.item_name || "").trim()) {
+                notifyError(`Enter an item name on line ${index + 1}.`);
+                return;
+            }
+
+            if (Number(item.quantity) <= 0) {
+                notifyError(
+                    `Quantity must be greater than zero on line ${index + 1}.`
+                );
+                return;
+            }
+
+            if (Number(item.discount_percent) < 0 || Number(item.discount_percent) > 100) {
+                notifyError(
+                    `Discount must be between 0 and 100 on line ${index + 1}.`
+                );
+                return;
+            }
+
+            if (Number(item.retail_price) < 0) {
+                notifyError(
+                    `Retail price cannot be negative on line ${index + 1}.`
+                );
+                return;
+            }
+
+            if (Number(item.tax_rate) < 0) {
+                notifyError(
+                    `Tax rate cannot be negative on line ${index + 1}.`
+                );
+                return;
+            }
+        }
+
+        if (Number(form.exchange_rate) <= 0) {
+            notifyError("Exchange Rate must be greater than zero.");
+            return;
+        }
+
+        setSaving(true);
+        setError("");
+        setMessage("");
+
+        try {
+            const payload = {
+                ...form,
+                customer_id: Number(form.customer_id),
+                warehouse_id: Number(form.warehouse_id),
+                exchange_rate: Number(form.exchange_rate || 1),
+                subtotal: totals.subtotal,
+                tax_amount: totals.taxAmount,
+                gross_amount: totals.grossAmount,
+                items: form.items
+                    .filter((item) => String(item.item_name || "").trim())
+                    .map((item) => ({
+                        ...item,
+                        product_id: item.product_id
+                            ? Number(item.product_id)
+                            : null,
+                        quantity: Number(item.quantity || 0),
+                        retail_price: Number(item.retail_price || 0),
+                        discount_percent: Number(item.discount_percent || 0),
+                        unit_price: Number(item.unit_price || 0),
+                        amount: Number(item.amount || 0),
+                        tax_rate: Number(item.tax_rate || 0),
+                        tax_amount: Number(item.tax_amount || 0),
+                        gross_amount: Number(item.gross_amount || 0),
+                        item_balance: Number(item.item_balance || 0),
+                    })),
+            };
+
+            const url = form.order_id
+                ? `/api/sales-orders/${form.order_id}`
+                : "/api/sales-orders";
+
+            const method = form.order_id ? "PUT" : "POST";
+
+            const response = await fetch(url, {
+                method,
+                credentials: "same-origin",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                },
+                body: JSON.stringify(payload),
+            });
+
+            const data = await response.json();
+
+            if (!response.ok || !data.success) {
+                throw new Error(
+                    data.message || "Unable to save Sales Order."
+                );
+            }
+
+            notifySuccess(
+                data.message || "Sales Order saved successfully."
+            );
+
+            await loadData();
+
+            if (data.order?.order_id) {
+                await openOrder(data.order, "edit");
+            } else if (form.order_id) {
+                await openOrder(
+                    {
+                        order_id: form.order_id,
+                    },
+                    "edit"
+                );
+            } else {
+                setView("list");
+                setForm(null);
+            }
+        } catch (err) {
+            notifyError(err.message || "Unable to save Sales Order.");
+        } finally {
+            setSaving(false);
+        }
+    }
+
+    // ---------------------------------------------------------
+    // DELETE ORDER
+    // ---------------------------------------------------------
+
+    async function deleteOrder() {
+        if (!permissions.canDelete) {
+            notifyError("You do not have permission to delete Sales Orders.");
+            return;
+        }
+
+        if (!form?.order_id) return;
+
+        const confirmed = window.confirm(
+            `Delete Sales Order ${form.order_number}? This cannot be undone.`
+        );
+
+        if (!confirmed) return;
+
+        try {
+            setSaving(true);
+            setError("");
+            setMessage("");
+
+            const response = await fetch(
+                `/api/sales-orders/${form.order_id}`,
+                {
+                    method: "DELETE",
+                    credentials: "same-origin",
+                    headers: {
+                        Accept: "application/json",
+                    },
+                }
+            );
+
+            const data = await response.json();
+
+            if (!response.ok || !data.success) {
+                throw new Error(
+                    data.message || "Unable to delete the order."
+                );
+            }
+
+            notifySuccess(data.message || "Sales Order deleted.");
+
+            setView("list");
+            setForm(null);
+
+            await loadData();
+        } catch (err) {
+            notifyError(err.message || "Unable to delete the order.");
+        } finally {
+            setSaving(false);
+        }
+    }
+
+    // ---------------------------------------------------------
+    // CONVERT QUOTATION
+    // ---------------------------------------------------------
+
+    async function convertQuotation() {
+        if (!permissions.canCreate) {
+            notifyError("You do not have permission to create Sales Orders.");
+            return;
+        }
+
+        const rawId = window.prompt(
+            "Enter the ID of the approved Sales Quotation to convert:"
+        );
+
+        if (rawId === null) return;
+
+        const quotationId = Number(rawId.trim());
+
+        if (!Number.isSafeInteger(quotationId) || quotationId <= 0) {
+            notifyError("Enter a valid quotation ID.");
+            return;
+        }
+
+        try {
+            setSaving(true);
+            setError("");
+            setMessage("");
+
+            const response = await fetch(
+                `/api/sales-orders/from-quotation/${quotationId}`,
+                {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: {
+                        Accept: "application/json",
+                    },
+                }
+            );
+
+            const data = await response.json();
+
+            if (!response.ok || !data.success) {
+                throw new Error(
+                    data.message || "Could not convert the quotation."
+                );
+            }
+
+            await loadData();
+
+            if (data.order?.order_id) {
+                await openOrder(
+                    {
+                        order_id: data.order.order_id,
+                    },
+                    "view"
+                );
+            } else {
+                notifySuccess(data.message || "Quotation converted.");
+            }
+        } catch (err) {
+            notifyError(err.message || "Could not convert the quotation.");
+        } finally {
+            setSaving(false);
+        }
+    }
+
+    // ---------------------------------------------------------
+    // REPORT / PRINT
+    // ---------------------------------------------------------
+
+    function escapeHtml(value) {
+        return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+        })[char]);
+    }
+
+    function printReport(orderForm = form) {
+        if (!permissions.canView) {
+            notifyError("You do not have permission to view Sales Orders.");
+            return;
+        }
+
+        if (!orderForm) return;
+
+        const reportCurrency =
+            orderForm.currency || company?.currency || "PKR";
+
+        const customer = customers.find(
+            (item) =>
+                String(item.customer_id) === String(orderForm.customer_id)
+        );
+
+        const warehouse = warehouses.find(
+            (item) =>
+                String(item.warehouse_id) === String(orderForm.warehouse_id)
+        );
+
+        const reportItems = (orderForm.items || [])
+            .map((item, index) => {
+                const quantity = Number(item.quantity || 0);
+                const price = Number(item.unit_price || 0);
+                const amount = Number(
+                    item.amount ?? quantity * price
+                );
+                const tax = Number(item.tax_amount || 0);
+                const gross = Number(
+                    item.gross_amount ?? amount + tax
+                );
+
+                return `
+                    <tr>
+                        <td>${index + 1}</td>
+                        <td>${escapeHtml(item.item_name)}</td>
+                        <td>${escapeHtml(item.item_description || "")}</td>
+                        <td>${escapeHtml(item.uom || "")}</td>
+                        <td class="num">${quantity.toFixed(3)}</td>
+                        <td class="num">${price.toFixed(2)}</td>
+                        <td class="num">${amount.toFixed(2)}</td>
+                        <td class="num">${tax.toFixed(2)}</td>
+                        <td class="num">${gross.toFixed(2)}</td>
+                    </tr>
+                `;
+            })
+            .join("");
+
+        const reportSubtotal = Number(
+            orderForm.subtotal ?? totals.subtotal
+        );
+
+        const reportTax = Number(
+            orderForm.tax_amount ?? totals.taxAmount
+        );
+
+        const reportGross = Number(
+            orderForm.gross_amount ??
+                reportSubtotal + reportTax
+        );
+
+        const html = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8" />
+                <title>${escapeHtml(orderForm.order_number || "Sales Order")}</title>
+                <style>
+                    * { box-sizing: border-box; }
+                    body {
+                        font-family: Arial, sans-serif;
+                        color: #172033;
+                        padding: 24px;
+                    }
+                    h1 {
+                        margin: 0 0 6px;
+                        font-size: 25px;
+                    }
+                    .muted {
+                        color: #64748b;
+                        font-size: 12px;
+                    }
+                    .header {
+                        display: flex;
+                        justify-content: space-between;
+                        border-bottom: 2px solid #1d4ed8;
+                        padding-bottom: 18px;
+                    }
+                    .meta {
+                        display: grid;
+                        grid-template-columns: 1fr 1fr 1fr;
+                        gap: 14px;
+                        margin: 22px 0;
+                    }
+                    .field {
+                        border: 1px solid #e2e8f0;
+                        border-radius: 7px;
+                        padding: 10px;
+                    }
+                    .label {
+                        color: #64748b;
+                        text-transform: uppercase;
+                        font-size: 10px;
+                        margin-bottom: 6px;
+                    }
+                    .value {
+                        font-size: 13px;
+                        font-weight: 700;
+                        overflow-wrap: anywhere;
+                    }
+                    table {
+                        width: 100%;
+                        border-collapse: collapse;
+                        font-size: 11px;
+                        margin-top: 16px;
+                    }
+                    th {
+                        background: #eff6ff;
+                        text-align: left;
+                    }
+                    th, td {
+                        padding: 9px 7px;
+                        border: 1px solid #dbe3ee;
+                        vertical-align: top;
+                    }
+                    .num {
+                        text-align: right;
+                        white-space: nowrap;
+                    }
+                    .totals {
+                        margin: 18px 0 0 auto;
+                        width: 280px;
+                    }
+                    .total-row {
+                        display: flex;
+                        justify-content: space-between;
+                        padding: 8px 0;
+                        border-bottom: 1px solid #e2e8f0;
+                    }
+                    .grand {
+                        font-size: 17px;
+                        font-weight: 800;
+                        color: #1d4ed8;
+                    }
+                    .memo {
+                        margin-top: 24px;
+                        white-space: pre-wrap;
+                    }
+                    @media print {
+                        body { padding: 0; }
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="header">
+                    <div>
+                        <h1>${escapeHtml(company?.company_name || "Company")}</h1>
+                        <div class="muted">${escapeHtml(company?.address || "")}</div>
+                        <div class="muted">
+                            ${escapeHtml(company?.phone || "")}
+                            ${escapeHtml(company?.email || "")}
+                        </div>
+                    </div>
+
+                    <div style="text-align:right">
+                        <h1>SALES ORDER</h1>
+                        <div>
+                            <strong>${escapeHtml(orderForm.order_number || "TO BE GENERATED")}</strong>
+                        </div>
+                        <div class="muted">
+                            ${dateLabel(orderForm.transaction_date)}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="meta">
+                    <div class="field">
+                        <div class="label">Customer</div>
+                        <div class="value">
+                            ${escapeHtml(customer?.customer_name || orderForm.customer_name || "—")}
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="label">From Location</div>
+                        <div class="value">
+                            ${escapeHtml(warehouse?.warehouse_name || orderForm.warehouse_name || "—")}
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="label">Status</div>
+                        <div class="value">
+                            ${escapeHtml(orderForm.status || "DRAFT")}
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="label">Department</div>
+                        <div class="value">
+                            ${escapeHtml(orderForm.department || "—")}
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="label">Project</div>
+                        <div class="value">
+                            ${escapeHtml(orderForm.project || "—")}
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="label">Payment Terms</div>
+                        <div class="value">
+                            ${escapeHtml(orderForm.payment_term || "—")}
+                        </div>
+                    </div>
+                </div>
+
+                <h3>Transaction Lines</h3>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Item Name</th>
+                            <th>Description</th>
+                            <th>UOM</th>
+                            <th>Qty</th>
+                            <th>Unit Price</th>
+                            <th>Amount</th>
+                            <th>Tax</th>
+                            <th>Gross Amount</th>
+                        </tr>
+                    </thead>
+                    <tbody>${reportItems}</tbody>
+                </table>
+
+                <div class="totals">
+                    <div class="total-row">
+                        <span>Total Amount</span>
+                        <strong>${money(reportSubtotal, reportCurrency)}</strong>
+                    </div>
+
+                    <div class="total-row">
+                        <span>Tax Amount</span>
+                        <strong>${money(reportTax, reportCurrency)}</strong>
+                    </div>
+
+                    <div class="total-row grand">
+                        <span>Gross Amount</span>
+                        <span>${money(reportGross, reportCurrency)}</span>
+                    </div>
+                </div>
+
+                <div class="memo">
+                    <strong>Memo</strong><br/>
+                    ${escapeHtml(orderForm.memo || "—")}
+                </div>
+
+                <p class="muted" style="margin-top:32px">
+                    Generated from ERP Sales Orders.
+                </p>
+
+                <script>
+                    window.onload = () => window.print();
+                <\/script>
+            </body>
+            </html>
+        `;
+
+        const reportWindow = window.open(
+            "",
+            "_blank",
+            "width=1100,height=800"
+        );
+
+        if (!reportWindow) {
+            notifyError(
+                "Your browser blocked the report window. Allow pop-ups and try again."
+            );
+            return;
+        }
+
+        reportWindow.document.open();
+        reportWindow.document.write(html);
+        reportWindow.document.close();
+    }
+
+    // ---------------------------------------------------------
+    // TABS
+    // ---------------------------------------------------------
+
+    const tabs = [
+        { id: "lines", label: "Transaction Lines" },
+        { id: "accounting", label: "Accounting Lines" },
+        { id: "related", label: "Related Transactions" },
+        { id: "system", label: "System Information" },
+        { id: "attachments", label: "Attachments" },
+        { id: "terms", label: "Terms & Conditions" },
+    ];
+
+    // ---------------------------------------------------------
+    // PERMISSION LOADING
+    // ---------------------------------------------------------
+
+    if (permissionsLoading) {
+        return (
+            <div className="flex min-h-[60vh] items-center justify-center bg-slate-50 dark:bg-slate-900">
+                <div className="text-center">
+                    <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" />
+
+                    <p className="mt-4 text-sm font-medium text-slate-600 dark:text-slate-300">
+                        Verifying Sales Orders user rights…
+                    </p>
+                </div>
+            </div>
+        );
+    }
+
+    // ---------------------------------------------------------
+    // ACCESS DENIED
+    // ---------------------------------------------------------
+
+    if (!permissions.canView) {
+        return (
+            <AccessDenied
+                message={
+                    permissionsError ||
+                    "Your account does not have View permission for Sales Orders. Please contact your administrator."
+                }
+            />
+        );
+    }
+
+    // ---------------------------------------------------------
+    // DATA LOADING
+    // ---------------------------------------------------------
+
+    if (loading && view === "list" && !orders.length) {
+        return (
+            <div className="flex min-h-[50vh] items-center justify-center">
+                <div className="text-center">
+                    <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" />
+
+                    <p className="mt-4 text-sm text-slate-500">
+                        Loading Sales Orders…
+                    </p>
+                </div>
+            </div>
+        );
+    }
+
+    // ---------------------------------------------------------
+    // MAIN PAGE
+    // ---------------------------------------------------------
+
+    return (
+        <main className="min-h-screen bg-slate-50 p-4 text-slate-900 dark:bg-slate-900 dark:text-slate-100 sm:p-6 lg:p-8">
+            <div className="mx-auto max-w-[1800px] space-y-6">
+
+                {/* PAGE HEADER */}
+
+                <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
+                    <div>
+                        <div className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-[0.2em] text-blue-600 dark:text-blue-400">
+                            <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                            Sales Management
+                        </div>
+
+                        <h1 className="text-3xl font-black tracking-tight sm:text-4xl">
+                            {view === "form"
+                                ? `Sales Order — ${form?.order_number || "New Order"}`
+                                : "Sales Orders"}
+                        </h1>
+
+                        <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+                            Manage order history, customer commitments, and delivery workflow.
+                        </p>
+                    </div>
+
+                    {view === "list" ? (
+                        <div className="flex flex-wrap gap-2">
+                            {permissions.canCreate ? (
+                                <Button
+                                    onClick={convertQuotation}
+                                    disabled={saving}
+                                >
+                                    Convert Quotation
+                                </Button>
+                            ) : null}
+
+                            {permissions.canCreate ? (
+                                <Button
+                                    variant="primary"
+                                    onClick={openCreate}
+                                >
+                                    <span className="text-lg leading-none">+</span>
+                                    Create Sales Order
+                                </Button>
+                            ) : null}
+                        </div>
+                    ) : (
+                        <div className="flex flex-wrap gap-2">
+                            {mode === "edit" &&
+                            form?.order_id &&
+                            permissions.canDelete ? (
+                                <Button
+                                    variant="danger"
+                                    onClick={deleteOrder}
+                                    disabled={saving}
+                                >
+                                    Delete
+                                </Button>
+                            ) : null}
+
+                            {mode === "view" && permissions.canUpdate ? (
+                                <Button
+                                    onClick={() => {
+                                        if (!permissions.canUpdate) return;
+                                        setMode("edit");
+                                    }}
+                                >
+                                    Edit
+                                </Button>
+                            ) : null}
+
+                            {mode === "edit" ? (
+                                <Button
+                                    variant="primary"
+                                    onClick={saveOrder}
+                                    disabled={saving}
+                                >
+                                    {saving ? "Saving…" : "Save"}
+                                </Button>
+                            ) : null}
+
+                            <Button
+                                onClick={() => printReport()}
+                                disabled={!form}
+                            >
+                                Report / Print PDF
+                            </Button>
+
+                            <Button onClick={goBack}>
+                                Back
+                            </Button>
+                        </div>
+                    )}
+                </div>
+
+                {/* NOTIFICATIONS */}
+
+                {error ? (
+                    <div
+                        role="alert"
+                        className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300"
+                    >
+                        {error}
+                    </div>
+                ) : null}
+
+                {message ? (
+                    <div
+                        role="status"
+                        className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300"
+                    >
+                        {message}
+                    </div>
+                ) : null}
+
+                {/* LIST VIEW */}
+
+                {view === "list" ? (
+                    <>
+                        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                            <SummaryCard
+                                label="Total Sales Orders"
+                                value={orders.length}
+                            />
+
+                            <SummaryCard
+                                label="Approved Orders"
+                                value={orders.filter(
+                                    (order) => order.status === "APPROVED"
+                                ).length}
+                                accent="green"
+                            />
+
+                            <SummaryCard
+                                label="Pending Delivery Challan"
+                                value={orders.filter((order) =>
+                                    String(order.document_status || "")
+                                        .toLowerCase()
+                                        .includes("pending delivery")
+                                ).length}
+                                accent="purple"
+                            />
+
+                            <SummaryCard
+                                label="Gross Order Value"
+                                value={money(
+                                    orders.reduce(
+                                        (sum, order) =>
+                                            sum +
+                                            Number(order.gross_amount || 0),
+                                        0
+                                    ),
+                                    company?.currency || "PKR"
+                                )}
+                            />
+                        </div>
+
+                        <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-950">
+                            <div className="flex flex-col gap-4 border-b border-slate-200 p-5 dark:border-slate-800 lg:flex-row lg:items-center lg:justify-between">
+                                <div>
+                                    <h2 className="text-lg font-bold">
+                                        Sales Order History
+                                    </h2>
+
+                                    <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                                        Search and manage your saved orders.
+                                    </p>
+                                </div>
+
+                                <div className="flex flex-col gap-2 sm:flex-row">
+                                    <input
+                                        className={`${inputClass} min-w-0 sm:min-w-[280px]`}
+                                        placeholder="Search order, customer, location…"
+                                        value={search}
+                                        onChange={(event) =>
+                                            setSearch(event.target.value)
+                                        }
+                                    />
+
+                                    <select
+                                        className={inputClass}
+                                        value={statusFilter}
+                                        onChange={(event) =>
+                                            setStatusFilter(event.target.value)
+                                        }
+                                    >
+                                        <option value="ALL">All Statuses</option>
+                                        <option value="DRAFT">Draft</option>
+                                        <option value="APPROVED">Approved</option>
+                                        <option value="CANCELLED">Cancelled</option>
+                                    </select>
+
+                                    <Button
+                                        onClick={loadData}
+                                        disabled={loading}
+                                    >
+                                        {loading ? "Refreshing…" : "Refresh"}
+                                    </Button>
+                                </div>
+                            </div>
+
+                            <div className="overflow-x-auto">
+                                <table className="w-full min-w-[1300px] text-left text-sm">
+                                    <thead className="bg-slate-100 text-[11px] uppercase tracking-wide text-slate-600 dark:bg-slate-900 dark:text-slate-400">
+                                        <tr>
+                                            {permissions.canUpdate ? (
+                                                <th className="px-4 py-4">
+                                                    Edit
+                                                </th>
+                                            ) : null}
+
+                                            <th className="px-4 py-4">
+                                                View
+                                            </th>
+
+                                            <th className="px-4 py-4">
+                                                Report
+                                            </th>
+
+                                            <th className="px-4 py-4">
+                                                Customer
+                                            </th>
+
+                                            <th className="px-4 py-4">
+                                                Transaction Number
+                                            </th>
+
+                                            <th className="px-4 py-4">
+                                                Location Name
+                                            </th>
+
+                                            <th className="px-4 py-4">
+                                                Status
+                                            </th>
+
+                                            <th className="px-4 py-4">
+                                                Trandate
+                                            </th>
+
+                                            <th className="px-4 py-4">
+                                                Transaction Type
+                                            </th>
+
+                                            <th className="px-4 py-4">
+                                                Created From
+                                            </th>
+
+                                            <th className="px-4 py-4">
+                                                Document Status
+                                            </th>
+
+                                            <th className="px-4 py-4 text-right">
+                                                Gross Amount
+                                            </th>
+                                        </tr>
+                                    </thead>
+
+                                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                                        {filteredOrders.map((order) => (
+                                            <tr
+                                                key={order.order_id}
+                                                className="transition hover:bg-blue-50/60 dark:hover:bg-slate-900"
+                                            >
+                                                {permissions.canUpdate ? (
+                                                    <td className="px-4 py-3">
+                                                        <button
+                                                            className="font-semibold text-blue-600 hover:underline disabled:opacity-40 dark:text-blue-400"
+                                                            onClick={() =>
+                                                                openOrder(
+                                                                    order,
+                                                                    "edit"
+                                                                )
+                                                            }
+                                                            disabled={
+                                                                !permissions.canUpdate
+                                                            }
+                                                        >
+                                                            Edit
+                                                        </button>
+                                                    </td>
+                                                ) : null}
+
+                                                <td className="px-4 py-3">
+                                                    <button
+                                                        className="font-semibold text-slate-700 hover:underline dark:text-slate-200"
+                                                        onClick={() =>
+                                                            openOrder(
+                                                                order,
+                                                                "view"
+                                                            )
+                                                        }
+                                                    >
+                                                        View
+                                                    </button>
+                                                </td>
+
+                                                <td className="px-4 py-3">
+                                                    <button
+                                                        className="font-semibold text-emerald-700 hover:underline dark:text-emerald-400"
+                                                        onClick={async () => {
+                                                            const reportForm =
+                                                                await openOrder(
+                                                                    order,
+                                                                    "view"
+                                                                );
+
+                                                            if (reportForm) {
+                                                                printReport(
+                                                                    reportForm
+                                                                );
+                                                            }
+                                                        }}
+                                                    >
+                                                        Report
+                                                    </button>
+                                                </td>
+
+                                                <td className="whitespace-nowrap px-4 py-3 font-semibold">
+                                                    {order.customer_name || "—"}
+                                                </td>
+
+                                                <td className="whitespace-nowrap px-4 py-3 font-bold text-blue-700 dark:text-blue-300">
+                                                    {order.order_number}
+                                                </td>
+
+                                                <td className="whitespace-nowrap px-4 py-3">
+                                                    {order.warehouse_name || "—"}
+                                                </td>
+
+                                                <td className="px-4 py-3">
+                                                    <StatusBadge
+                                                        status={order.status}
+                                                    />
+                                                </td>
+
+                                                <td className="whitespace-nowrap px-4 py-3">
+                                                    {dateLabel(
+                                                        order.transaction_date
+                                                    )}
+                                                </td>
+
+                                                <td className="whitespace-nowrap px-4 py-3 text-xs font-semibold text-slate-500">
+                                                    SALESORDER
+                                                </td>
+
+                                                <td className="whitespace-nowrap px-4 py-3">
+                                                    {order.source_quotation_number ||
+                                                        "—"}
+                                                </td>
+
+                                                <td className="px-4 py-3">
+                                                    <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
+                                                        {order.document_status ||
+                                                            "Pending Delivery Challan"}
+                                                    </span>
+                                                </td>
+
+                                                <td className="whitespace-nowrap px-4 py-3 text-right font-bold">
+                                                    {money(
+                                                        order.gross_amount,
+                                                        order.currency ||
+                                                            company?.currency ||
+                                                            "PKR"
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        ))}
+
+                                        {!filteredOrders.length ? (
+                                            <tr>
+                                                <td
+                                                    colSpan={
+                                                        permissions.canUpdate
+                                                            ? 12
+                                                            : 11
+                                                    }
+                                                    className="px-6 py-16 text-center"
+                                                >
+                                                    <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-50 text-2xl dark:bg-blue-950">
+                                                        📄
+                                                    </div>
+
+                                                    <h3 className="mt-4 font-bold">
+                                                        No Sales Orders found
+                                                    </h3>
+
+                                                    <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                                                        Create a new order or
+                                                        adjust your search
+                                                        filters.
+                                                    </p>
+
+                                                    {permissions.canCreate ? (
+                                                        <div className="mt-4">
+                                                            <Button
+                                                                variant="primary"
+                                                                onClick={
+                                                                    openCreate
+                                                                }
+                                                            >
+                                                                Create Sales
+                                                                Order
+                                                            </Button>
+                                                        </div>
+                                                    ) : null}
+                                                </td>
+                                            </tr>
+                                        ) : null}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 px-5 py-4 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                                <span>
+                                    Showing {filteredOrders.length} of{" "}
+                                    {orders.length} orders
+                                </span>
+
+                                <span>
+                                    Amounts are displayed in the order
+                                    currency.
+                                </span>
+                            </div>
+                        </section>
+                    </>
+                ) : null}
+
+                {/* FORM VIEW */}
+
+                {view === "form" && form ? (
+                    <>
+                        <div className="grid gap-4 sm:grid-cols-3">
+                            <SummaryCard
+                                label="Total Amount"
+                                value={money(totals.subtotal, currency)}
+                            />
+
+                            <SummaryCard
+                                label="Tax Amount"
+                                value={money(totals.taxAmount, currency)}
+                                accent="purple"
+                            />
+
+                            <SummaryCard
+                                label="Gross Amount"
+                                value={money(totals.grossAmount, currency)}
+                                accent="green"
+                            />
+                        </div>
+
+                        <Section
+                            title="Sales Order Details"
+                            description="Enter the transaction header information."
+                            action={<StatusBadge status={form.status} />}
+                        >
+                            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                                <Field label="Transaction Number">
+                                    <input
+                                        className={`${inputClass} bg-slate-100 dark:bg-slate-800`}
+                                        readOnly
+                                        value={
+                                            form.order_number ||
+                                            "TO BE GENERATED"
+                                        }
+                                    />
+                                </Field>
+
+                                <Field label="Transaction Date">
+                                    <input
+                                        className={inputClass}
+                                        type="date"
+                                        disabled={isReadOnly}
+                                        value={String(
+                                            form.transaction_date || today()
+                                        ).slice(0, 10)}
+                                        onChange={(event) =>
+                                            updateForm(
+                                                "transaction_date",
+                                                event.target.value
+                                            )
+                                        }
+                                    />
+                                </Field>
+
+                                <Field label="Status">
+                                    <select
+                                        className={inputClass}
+                                        disabled={isReadOnly}
+                                        value={form.status || "DRAFT"}
+                                        onChange={(event) =>
+                                            updateForm(
+                                                "status",
+                                                event.target.value
+                                            )
+                                        }
+                                    >
+                                        <option value="DRAFT">DRAFT</option>
+                                        <option value="APPROVED">APPROVED</option>
+                                        <option value="CANCELLED">
+                                            CANCELLED
+                                        </option>
+                                    </select>
+                                </Field>
+
+                                <Field label="Subsidiary / Company">
+                                    <input
+                                        className={`${inputClass} bg-slate-100 dark:bg-slate-800`}
+                                        readOnly
+                                        value={
+                                            company?.company_name ||
+                                            "Current Company"
+                                        }
+                                    />
+                                </Field>
+
+                                <Field label="Customer">
+                                    <select
+                                        className={inputClass}
+                                        disabled={isReadOnly}
+                                        value={form.customer_id || ""}
+                                        onChange={(event) => {
+                                            const customerId =
+                                                event.target.value;
+
+                                            const customer = customers.find(
+                                                (item) =>
+                                                    String(item.customer_id) ===
+                                                    customerId
+                                            );
+
+                                            setForm((current) => ({
+                                                ...current,
+                                                customer_id: customerId,
+                                                customer_credit_limit: Number(
+                                                    customer?.credit_limit || 0
+                                                ),
+                                            }));
+                                        }}
+                                    >
+                                        <option value="">
+                                            Select Customer
+                                        </option>
+
+                                        {customers.map((customer) => (
+                                            <option
+                                                key={customer.customer_id}
+                                                value={customer.customer_id}
+                                            >
+                                                {customer.customer_name} (
+                                                {customer.customer_code})
+                                            </option>
+                                        ))}
+                                    </select>
+                                </Field>
+
+                                <Field label="From Location">
+                                    <select
+                                        className={inputClass}
+                                        disabled={isReadOnly}
+                                        value={form.warehouse_id || ""}
+                                        onChange={(event) =>
+                                            updateForm(
+                                                "warehouse_id",
+                                                event.target.value
+                                            )
+                                        }
+                                    >
+                                        <option value="">
+                                            Select Location
+                                        </option>
+
+                                        {warehouses.map((warehouse) => (
+                                            <option
+                                                key={warehouse.warehouse_id}
+                                                value={warehouse.warehouse_id}
+                                            >
+                                                {warehouse.warehouse_name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </Field>
+
+                                <Field label="Project">
+                                    <input
+                                        className={inputClass}
+                                        disabled={isReadOnly}
+                                        value={form.project || ""}
+                                        onChange={(event) =>
+                                            updateForm(
+                                                "project",
+                                                event.target.value
+                                            )
+                                        }
+                                        placeholder="Project name"
+                                    />
+                                </Field>
+
+                                <Field label="Department">
+                                    <input
+                                        className={inputClass}
+                                        disabled={isReadOnly}
+                                        value={form.department || ""}
+                                        onChange={(event) =>
+                                            updateForm(
+                                                "department",
+                                                event.target.value
+                                            )
+                                        }
+                                        placeholder="Department"
+                                    />
+                                </Field>
+
+                                <Field label="Sales Rep">
+                                    <input
+                                        className={inputClass}
+                                        disabled={isReadOnly}
+                                        value={form.sales_rep || ""}
+                                        onChange={(event) =>
+                                            updateForm(
+                                                "sales_rep",
+                                                event.target.value
+                                            )
+                                        }
+                                        placeholder="Sales representative"
+                                    />
+                                </Field>
+
+                                <Field label="Class">
+                                    <input
+                                        className={inputClass}
+                                        disabled={isReadOnly}
+                                        value={form.order_class || ""}
+                                        onChange={(event) =>
+                                            updateForm(
+                                                "order_class",
+                                                event.target.value
+                                            )
+                                        }
+                                        placeholder="Class"
+                                    />
+                                </Field>
+
+                                <Field label="Payment Terms">
+                                    <input
+                                        className={inputClass}
+                                        disabled={isReadOnly}
+                                        value={form.payment_term || ""}
+                                        onChange={(event) =>
+                                            updateForm(
+                                                "payment_term",
+                                                event.target.value
+                                            )
+                                        }
+                                        placeholder="e.g. 60 DAYS"
+                                    />
+                                </Field>
+
+                                <Field label="Currency">
+                                    <select
+                                        className={inputClass}
+                                        disabled={isReadOnly}
+                                        value={form.currency || "PKR"}
+                                        onChange={(event) =>
+                                            updateForm(
+                                                "currency",
+                                                event.target.value
+                                            )
+                                        }
+                                    >
+                                        <option value="PKR">
+                                            Rupees (PKR)
+                                        </option>
+                                        <option value="USD">
+                                            US Dollar (USD)
+                                        </option>
+                                        <option value="AED">
+                                            UAE Dirham (AED)
+                                        </option>
+                                        <option value="SAR">
+                                            Saudi Riyal (SAR)
+                                        </option>
+                                        <option value="GBP">
+                                            British Pound (GBP)
+                                        </option>
+                                        <option value="EUR">
+                                            Euro (EUR)
+                                        </option>
+                                    </select>
+                                </Field>
+
+                                <Field label="Exchange Rate">
+                                    <input
+                                        className={inputClass}
+                                        type="number"
+                                        min="0.000001"
+                                        step="0.000001"
+                                        disabled={isReadOnly}
+                                        value={form.exchange_rate ?? 1}
+                                        onChange={(event) =>
+                                            updateForm(
+                                                "exchange_rate",
+                                                event.target.value
+                                            )
+                                        }
+                                    />
+                                </Field>
+
+                                <Field label="Customer Credit Limit">
+                                    <input
+                                        className={`${inputClass} bg-slate-100 dark:bg-slate-800`}
+                                        readOnly
+                                        value={money(
+                                            form.customer_credit_limit,
+                                            currency
+                                        )}
+                                    />
+                                </Field>
+
+                                <Field label="Customer Balance">
+                                    <input
+                                        className={`${inputClass} bg-slate-100 dark:bg-slate-800`}
+                                        readOnly
+                                        value={money(
+                                            form.customer_balance || 0,
+                                            currency
+                                        )}
+                                    />
+                                </Field>
+
+                                <Field label="Available Credit Limit">
+                                    <input
+                                        className={`${inputClass} bg-slate-100 dark:bg-slate-800`}
+                                        readOnly
+                                        value={money(
+                                            Number(
+                                                form.customer_credit_limit || 0
+                                            ) -
+                                                Number(
+                                                    form.customer_balance || 0
+                                                ),
+                                            currency
+                                        )}
+                                    />
+                                </Field>
+
+                                <Field
+                                    label="Memo"
+                                    className="sm:col-span-2 xl:col-span-4"
+                                >
+                                    <textarea
+                                        className={inputClass}
+                                        rows={2}
+                                        disabled={isReadOnly}
+                                        value={form.memo || ""}
+                                        onChange={(event) =>
+                                            updateForm(
+                                                "memo",
+                                                event.target.value
+                                            )
+                                        }
+                                        placeholder="Enter transaction notes…"
+                                    />
+                                </Field>
+                            </div>
+                        </Section>
+
+                        {/* TRANSACTION WORKSPACE */}
+
+                        <Section
+                            title="Transaction Workspace"
+                            description="Manage transaction lines, related transactions, and supporting information."
+                            action={
+                                <span className="text-xs text-slate-500">
+                                    {isReadOnly ? "View mode" : "Edit mode"}
+                                </span>
+                            }
+                        >
+                            <div className="mb-5 flex gap-2 overflow-x-auto border-b border-slate-200 pb-3 dark:border-slate-800">
+                                {tabs.map((tab) => (
+                                    <button
+                                        key={tab.id}
+                                        onClick={() =>
+                                            setActiveTab(tab.id)
+                                        }
+                                        className={`whitespace-nowrap rounded-lg px-3 py-2 text-xs font-bold transition ${
+                                            activeTab === tab.id
+                                                ? "bg-blue-600 text-white"
+                                                : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+                                        }`}
+                                    >
+                                        {tab.label}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* TRANSACTION LINES */}
+
+                            {activeTab === "lines" ? (
+                                <>
+                                    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                                        <div>
+                                            <h4 className="font-bold">
+                                                Transaction Lines
+                                            </h4>
+
+                                            <p className="mt-1 text-xs text-slate-500">
+                                                Line amounts and taxes are
+                                                calculated automatically.
+                                            </p>
+                                        </div>
+
+                                        {!isReadOnly ? (
+                                            <Button
+                                                variant="primary"
+                                                onClick={addLine}
+                                            >
+                                                + Add Item
+                                            </Button>
+                                        ) : null}
+                                    </div>
+
+                                    <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                                        <table className="w-full min-w-[1550px] text-left text-xs">
+                                            <thead className="bg-slate-100 text-[10px] uppercase tracking-wide text-slate-600 dark:bg-slate-900 dark:text-slate-400">
+                                                <tr>
+                                                    <th className="px-3 py-3">
+                                                        #
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        Item Name
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        Item Description
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        Item Balance
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        UOM
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        Quantity
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        Retail Price
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        Discount %
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        Unit Price
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        Amount
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        Tax Code
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        Tax %
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        Tax Amount
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        Gross Amount
+                                                    </th>
+                                                    <th className="px-3 py-3">
+                                                        Memo
+                                                    </th>
+                                                    {!isReadOnly ? (
+                                                        <th className="px-3 py-3">
+                                                            Action
+                                                        </th>
+                                                    ) : null}
+                                                </tr>
+                                            </thead>
+
+                                            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                                                {form.items.map(
+                                                    (item, index) => (
+                                                        <tr
+                                                            key={index}
+                                                            className="align-top"
+                                                        >
+                                                            <td className="px-3 py-3 font-bold">
+                                                                {index + 1}
+                                                            </td>
+
+                                                            <td className="min-w-[190px] px-2 py-2">
+                                                                <select
+                                                                    className={inputClass}
+                                                                    disabled={
+                                                                        isReadOnly
+                                                                    }
+                                                                    value={
+                                                                        item.product_id ||
+                                                                        ""
+                                                                    }
+                                                                    onChange={(
+                                                                        event
+                                                                    ) =>
+                                                                        updateLine(
+                                                                            index,
+                                                                            "product_id",
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    }
+                                                                >
+                                                                    <option value="">
+                                                                        Custom
+                                                                        item /
+                                                                        select
+                                                                        product
+                                                                    </option>
+
+                                                                    {products.map(
+                                                                        (
+                                                                            product
+                                                                        ) => (
+                                                                            <option
+                                                                                key={
+                                                                                    product.product_id
+                                                                                }
+                                                                                value={
+                                                                                    product.product_id
+                                                                                }
+                                                                            >
+                                                                                {
+                                                                                    product.product_name
+                                                                                }{" "}
+                                                                                (
+                                                                                {
+                                                                                    product.sku
+                                                                                }
+                                                                                )
+                                                                            </option>
+                                                                        )
+                                                                    )}
+                                                                </select>
+
+                                                                <input
+                                                                    className={`${inputClass} mt-2`}
+                                                                    disabled={
+                                                                        isReadOnly
+                                                                    }
+                                                                    value={
+                                                                        item.item_name ||
+                                                                        ""
+                                                                    }
+                                                                    onChange={(
+                                                                        event
+                                                                    ) =>
+                                                                        updateLine(
+                                                                            index,
+                                                                            "item_name",
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    }
+                                                                    placeholder="Item name"
+                                                                />
+                                                            </td>
+
+                                                            <td className="min-w-[170px] px-2 py-2">
+                                                                <input
+                                                                    className={inputClass}
+                                                                    disabled={
+                                                                        isReadOnly
+                                                                    }
+                                                                    value={
+                                                                        item.item_description ||
+                                                                        ""
+                                                                    }
+                                                                    onChange={(
+                                                                        event
+                                                                    ) =>
+                                                                        updateLine(
+                                                                            index,
+                                                                            "item_description",
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    }
+                                                                />
+                                                            </td>
+
+                                                            <td className="min-w-[100px] px-2 py-2">
+                                                                <input
+                                                                    className={inputClass}
+                                                                    type="number"
+                                                                    disabled={
+                                                                        isReadOnly
+                                                                    }
+                                                                    value={
+                                                                        item.item_balance ??
+                                                                        0
+                                                                    }
+                                                                    onChange={(
+                                                                        event
+                                                                    ) =>
+                                                                        updateLine(
+                                                                            index,
+                                                                            "item_balance",
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    }
+                                                                />
+                                                            </td>
+
+                                                            <td className="min-w-[90px] px-2 py-2">
+                                                                <input
+                                                                    className={inputClass}
+                                                                    disabled={
+                                                                        isReadOnly
+                                                                    }
+                                                                    value={
+                                                                        item.uom ||
+                                                                        ""
+                                                                    }
+                                                                    onChange={(
+                                                                        event
+                                                                    ) =>
+                                                                        updateLine(
+                                                                            index,
+                                                                            "uom",
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    }
+                                                                />
+                                                            </td>
+
+                                                            <td className="min-w-[100px] px-2 py-2">
+                                                                <input
+                                                                    className={inputClass}
+                                                                    type="number"
+                                                                    min="0.001"
+                                                                    step="0.001"
+                                                                    disabled={
+                                                                        isReadOnly
+                                                                    }
+                                                                    value={
+                                                                        item.quantity ??
+                                                                        1
+                                                                    }
+                                                                    onChange={(
+                                                                        event
+                                                                    ) =>
+                                                                        updateLine(
+                                                                            index,
+                                                                            "quantity",
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    }
+                                                                />
+                                                            </td>
+
+                                                            <td className="min-w-[115px] px-2 py-2">
+                                                                <input
+                                                                    className={inputClass}
+                                                                    type="number"
+                                                                    min="0"
+                                                                    step="0.01"
+                                                                    disabled={
+                                                                        isReadOnly
+                                                                    }
+                                                                    value={
+                                                                        item.retail_price ??
+                                                                        0
+                                                                    }
+                                                                    onChange={(
+                                                                        event
+                                                                    ) =>
+                                                                        updateLine(
+                                                                            index,
+                                                                            "retail_price",
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    }
+                                                                />
+                                                            </td>
+
+                                                            <td className="min-w-[100px] px-2 py-2">
+                                                                <input
+                                                                    className={inputClass}
+                                                                    type="number"
+                                                                    min="0"
+                                                                    max="100"
+                                                                    step="0.001"
+                                                                    disabled={
+                                                                        isReadOnly
+                                                                    }
+                                                                    value={
+                                                                        item.discount_percent ??
+                                                                        0
+                                                                    }
+                                                                    onChange={(
+                                                                        event
+                                                                    ) =>
+                                                                        updateLine(
+                                                                            index,
+                                                                            "discount_percent",
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    }
+                                                                />
+                                                            </td>
+
+                                                            <td className="whitespace-nowrap px-3 py-4 font-semibold">
+                                                                {Number(
+                                                                    item.unit_price ||
+                                                                        0
+                                                                ).toFixed(2)}
+                                                            </td>
+
+                                                            <td className="whitespace-nowrap px-3 py-4 font-semibold">
+                                                                {Number(
+                                                                    item.amount ||
+                                                                        0
+                                                                ).toFixed(2)}
+                                                            </td>
+
+                                                            <td className="min-w-[100px] px-2 py-2">
+                                                                <input
+                                                                    className={inputClass}
+                                                                    disabled={
+                                                                        isReadOnly
+                                                                    }
+                                                                    value={
+                                                                        item.tax_code ||
+                                                                        ""
+                                                                    }
+                                                                    onChange={(
+                                                                        event
+                                                                    ) =>
+                                                                        updateLine(
+                                                                            index,
+                                                                            "tax_code",
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    }
+                                                                />
+                                                            </td>
+
+                                                            <td className="min-w-[90px] px-2 py-2">
+                                                                <input
+                                                                    className={inputClass}
+                                                                    type="number"
+                                                                    min="0"
+                                                                    step="0.001"
+                                                                    disabled={
+                                                                        isReadOnly
+                                                                    }
+                                                                    value={
+                                                                        item.tax_rate ??
+                                                                        0
+                                                                    }
+                                                                    onChange={(
+                                                                        event
+                                                                    ) =>
+                                                                        updateLine(
+                                                                            index,
+                                                                            "tax_rate",
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    }
+                                                                />
+                                                            </td>
+
+                                                            <td className="whitespace-nowrap px-3 py-4">
+                                                                {Number(
+                                                                    item.tax_amount ||
+                                                                        0
+                                                                ).toFixed(2)}
+                                                            </td>
+
+                                                            <td className="whitespace-nowrap px-3 py-4 font-bold text-emerald-700 dark:text-emerald-400">
+                                                                {Number(
+                                                                    item.gross_amount ||
+                                                                        0
+                                                                ).toFixed(2)}
+                                                            </td>
+
+                                                            <td className="min-w-[140px] px-2 py-2">
+                                                                <input
+                                                                    className={inputClass}
+                                                                    disabled={
+                                                                        isReadOnly
+                                                                    }
+                                                                    value={
+                                                                        item.memo ||
+                                                                        ""
+                                                                    }
+                                                                    onChange={(
+                                                                        event
+                                                                    ) =>
+                                                                        updateLine(
+                                                                            index,
+                                                                            "memo",
+                                                                            event
+                                                                                .target
+                                                                                .value
+                                                                        )
+                                                                    }
+                                                                />
+                                                            </td>
+
+                                                            {!isReadOnly ? (
+                                                                <td className="px-2 py-3">
+                                                                    <button
+                                                                        className="rounded-lg px-2 py-1 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950"
+                                                                        onClick={() =>
+                                                                            removeLine(
+                                                                                index
+                                                                            )
+                                                                        }
+                                                                        title="Remove line"
+                                                                    >
+                                                                        Remove
+                                                                    </button>
+                                                                </td>
+                                                            ) : null}
+                                                        </tr>
+                                                    )
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+
+                                    <div className="mt-5 flex flex-wrap items-start justify-between gap-5">
+                                        <div className="max-w-xl text-xs leading-5 text-slate-500 dark:text-slate-400">
+                                            Saving a Sales Order records the
+                                            order and its lines only. It does
+                                            not deduct inventory or create
+                                            accounting journals.
+                                        </div>
+
+                                        <div className="w-full max-w-sm rounded-xl bg-slate-50 p-4 dark:bg-slate-900">
+                                            <div className="flex justify-between py-2 text-sm">
+                                                <span className="text-slate-500">
+                                                    Total Amount
+                                                </span>
+
+                                                <strong>
+                                                    {money(
+                                                        totals.subtotal,
+                                                        currency
+                                                    )}
+                                                </strong>
+                                            </div>
+
+                                            <div className="flex justify-between py-2 text-sm">
+                                                <span className="text-slate-500">
+                                                    Tax Amount
+                                                </span>
+
+                                                <strong>
+                                                    {money(
+                                                        totals.taxAmount,
+                                                        currency
+                                                    )}
+                                                </strong>
+                                            </div>
+
+                                            <div className="mt-2 flex justify-between border-t border-slate-200 pt-3 text-base dark:border-slate-700">
+                                                <span className="font-bold">
+                                                    Gross Amount
+                                                </span>
+
+                                                <strong className="text-emerald-700 dark:text-emerald-400">
+                                                    {money(
+                                                        totals.grossAmount,
+                                                        currency
+                                                    )}
+                                                </strong>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </>
+                            ) : null}
+
+                            {/* ACCOUNTING */}
+
+                            {activeTab === "accounting" ? (
+                                <div className="rounded-xl border border-dashed border-slate-300 p-8 text-center dark:border-slate-700">
+                                    <h4 className="font-bold">
+                                        Accounting Lines
+                                    </h4>
+
+                                    <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+                                        Sales Orders do not post accounting
+                                        entries. Accounting entries should be
+                                        generated by your configured invoicing
+                                        workflow.
+                                    </p>
+                                </div>
+                            ) : null}
+
+                            {/* RELATED TRANSACTIONS */}
+
+                            {activeTab === "related" ? (
+                                <div className="space-y-3">
+                                    <div className="rounded-xl bg-slate-50 p-4 dark:bg-slate-900">
+                                        <p className="text-xs font-bold uppercase text-slate-500">
+                                            Created From
+                                        </p>
+
+                                        <p className="mt-1 font-semibold">
+                                            {form.source_quotation_number ||
+                                                (form.source_quotation_id
+                                                    ? `Quotation ID ${form.source_quotation_id}`
+                                                    : "Direct Sales Order")}
+                                        </p>
+                                    </div>
+
+                                    <div className="rounded-xl bg-slate-50 p-4 dark:bg-slate-900">
+                                        <p className="text-xs font-bold uppercase text-slate-500">
+                                            Document Status
+                                        </p>
+
+                                        <p className="mt-1 font-semibold">
+                                            {form.document_status ||
+                                                "Pending Delivery Challan"}
+                                        </p>
+                                    </div>
+
+                                    {form.order_id &&
+                                    form.status === "APPROVED" ? (
+                                        <Button
+                                            variant="success"
+                                            onClick={() =>
+                                                notifyError(
+                                                    "Delivery Challan creation has not been implemented yet. The order has not been changed."
+                                                )
+                                            }
+                                        >
+                                            Create Delivery Challan
+                                        </Button>
+                                    ) : null}
+                                </div>
+                            ) : null}
+
+                            {/* SYSTEM INFORMATION */}
+
+                            {activeTab === "system" ? (
+                                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                                    <Field label="Internal Order ID">
+                                        <input
+                                            className={inputClass}
+                                            readOnly
+                                            value={
+                                                form.order_id ||
+                                                "Assigned when saved"
+                                            }
+                                        />
+                                    </Field>
+
+                                    <Field label="Created At">
+                                        <input
+                                            className={inputClass}
+                                            readOnly
+                                            value={
+                                                form.created_at
+                                                    ? new Date(
+                                                          form.created_at
+                                                      ).toLocaleString()
+                                                    : "Assigned when saved"
+                                            }
+                                        />
+                                    </Field>
+
+                                    <Field label="Updated At">
+                                        <input
+                                            className={inputClass}
+                                            readOnly
+                                            value={
+                                                form.updated_at
+                                                    ? new Date(
+                                                          form.updated_at
+                                                      ).toLocaleString()
+                                                    : "—"
+                                            }
+                                        />
+                                    </Field>
+
+                                    <Field label="Created From">
+                                        <input
+                                            className={inputClass}
+                                            readOnly
+                                            value={
+                                                form.source_quotation_number ||
+                                                (form.source_quotation_id
+                                                    ? `Quotation ${form.source_quotation_id}`
+                                                    : "Direct entry")
+                                            }
+                                        />
+                                    </Field>
+                                </div>
+                            ) : null}
+
+                            {/* ATTACHMENTS */}
+
+                            {activeTab === "attachments" ? (
+                                <div className="space-y-3">
+                                    <p className="text-sm text-slate-500 dark:text-slate-400">
+                                        Attachment storage has not been wired
+                                        to this page yet.
+                                    </p>
+
+                                    {form.attachment_url ? (
+                                        <a
+                                            href={form.attachment_url}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="font-semibold text-blue-600 underline"
+                                        >
+                                            {form.attachment_name ||
+                                                "Open attachment"}
+                                        </a>
+                                    ) : (
+                                        <p className="text-sm">
+                                            No attachment saved.
+                                        </p>
+                                    )}
+                                </div>
+                            ) : null}
+
+                            {/* TERMS AND CONDITIONS */}
+
+                            {activeTab === "terms" ? (
+                                <Field label="Terms & Conditions">
+                                    <textarea
+                                        className={inputClass}
+                                        rows={7}
+                                        disabled={isReadOnly}
+                                        value={form.terms_conditions || ""}
+                                        onChange={(event) =>
+                                            updateForm(
+                                                "terms_conditions",
+                                                event.target.value
+                                            )
+                                        }
+                                        placeholder="Enter the terms and conditions for this Sales Order…"
+                                    />
+                                </Field>
+                            ) : null}
+                        </Section>
+
+                        {/* FORM FOOTER */}
+
+                        <div className="flex flex-wrap justify-end gap-2 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950">
+                            {mode === "edit" ? (
+                                <Button
+                                    variant="primary"
+                                    onClick={saveOrder}
+                                    disabled={
+                                        saving ||
+                                        (form.order_id
+                                            ? !permissions.canUpdate
+                                            : !permissions.canCreate)
+                                    }
+                                >
+                                    {saving
+                                        ? "Saving…"
+                                        : "Save Sales Order"}
+                                </Button>
+                            ) : permissions.canUpdate ? (
+                                <Button
+                                    variant="primary"
+                                    onClick={() => setMode("edit")}
+                                >
+                                    Edit Sales Order
+                                </Button>
+                            ) : null}
+
+                            <Button onClick={() => printReport()}>
+                                Report / Print / Save PDF
+                            </Button>
+
+                            <Button onClick={goBack}>
+                                Back to History
+                            </Button>
+                        </div>
+                    </>
+                ) : null}
+            </div>
+        </main>
+    );
+}

@@ -1,19 +1,80 @@
+
 export const dynamic = "force-dynamic";
+
 import { getCurrentUser } from "@/lib/auth";
 import { hasPermission } from "@/lib/permissions";
 import DashboardAnalytics from "./DashboardAnalytics";
 import UserStatistics from "./UserStatistics";
-import {
-  UserRound,
-  ShieldCheck,
-  LayoutDashboard,
-  ArrowUpRight,
-  Sparkles,
-  Building2,
-  LockKeyhole,
-} from "lucide-react";
 
-function InfoCard({ title, value, description, icon: Icon, accent }) {
+function Icon({ name, size = 24, strokeWidth = 1.8, className = "", style = {} }) {
+  const paths = {
+    user: (
+      <>
+        <circle cx="12" cy="8" r="4" />
+        <path d="M5 21v-2a7 7 0 0 1 14 0v2" />
+      </>
+    ),
+    shield: (
+      <>
+        <path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z" />
+        <path d="m9 12 2 2 4-4" />
+      </>
+    ),
+    dashboard: (
+      <>
+        <rect x="3" y="3" width="8" height="8" rx="1" />
+        <rect x="13" y="3" width="8" height="5" rx="1" />
+        <rect x="13" y="10" width="8" height="11" rx="1" />
+        <rect x="3" y="13" width="8" height="8" rx="1" />
+      </>
+    ),
+    arrow: (
+      <>
+        <path d="M7 17 17 7" />
+        <path d="M7 7h10v10" />
+      </>
+    ),
+    sparkles: (
+      <>
+        <path d="m12 3 1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2L12 3Z" />
+        <path d="m19 14 1.2 2.8L23 18l-2.8 1.2L19 22l-1.2-2.8L15 18l2.8-1.2L19 14Z" />
+      </>
+    ),
+    building: (
+      <>
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <path d="M9 21V9h6v12M7 7h.01M17 7h.01M7 11h.01M17 11h.01M7 15h.01M17 15h.01" />
+      </>
+    ),
+    lock: (
+      <>
+        <rect x="4" y="10" width="16" height="11" rx="2" />
+        <path d="M8 10V7a4 4 0 1 1 8 0v3" />
+      </>
+    ),
+  };
+
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      style={style}
+      aria-hidden="true"
+    >
+      {paths[name]}
+    </svg>
+  );
+}
+
+function InfoCard({ title, value, description, icon, accent }) {
   const styles = {
     blue: {
       icon: "bg-sky-100 text-sky-700",
@@ -53,7 +114,7 @@ function InfoCard({ title, value, description, icon: Icon, accent }) {
         <div
           className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl ${style.icon} transition-transform duration-300 group-hover:scale-110`}
         >
-          <Icon size={23} strokeWidth={1.8} />
+          <Icon name={icon} size={23} />
         </div>
       </div>
 
@@ -62,7 +123,8 @@ function InfoCard({ title, value, description, icon: Icon, accent }) {
           ERP workspace
         </span>
 
-        <ArrowUpRight
+        <Icon
+          name="arrow"
           size={17}
           className="text-[var(--erp-primary)] transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5"
         />
@@ -76,7 +138,7 @@ function AccessDenied() {
     <main className="flex min-h-[60vh] items-center justify-center p-6">
       <section className="erp-card w-full max-w-lg p-8 text-center sm:p-10">
         <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-rose-500/10 text-rose-500">
-          <LockKeyhole size={32} />
+          <Icon name="lock" size={32} />
         </div>
 
         <h1 className="mt-5 text-2xl font-bold [color:var(--erp-text)]">
@@ -127,7 +189,6 @@ export default async function DashboardPage() {
 
   return (
     <div className="space-y-8 lg:space-y-10">
-      {/* Welcome banner */}
       <section
         className="relative isolate overflow-hidden rounded-3xl border p-6 shadow-sm transition-colors duration-300 sm:p-8 lg:p-10"
         style={{
@@ -156,7 +217,7 @@ export default async function DashboardPage() {
                 color: "var(--erp-green)",
               }}
             >
-              <Sparkles size={14} />
+              <Icon name="sparkles" size={14} />
               Welcome to your workspace
             </div>
 
@@ -199,7 +260,8 @@ export default async function DashboardPage() {
                   color: "var(--erp-text)",
                 }}
               >
-                <ShieldCheck
+                <Icon
+                  name="shield"
                   size={14}
                   style={{ color: "var(--erp-primary)" }}
                 />
@@ -218,13 +280,12 @@ export default async function DashboardPage() {
                 boxShadow: "var(--erp-shadow)",
               }}
             >
-              <LayoutDashboard size={52} strokeWidth={1.4} />
+              <Icon name="dashboard" size={52} strokeWidth={1.4} />
             </div>
           </div>
         </div>
       </section>
 
-      {/* Account overview */}
       <section className="space-y-4">
         <div>
           <div className="flex items-center gap-2">
@@ -244,7 +305,7 @@ export default async function DashboardPage() {
             title="Logged-in User"
             value={username}
             description="Your currently signed-in ERP account"
-            icon={UserRound}
+            icon="user"
             accent="blue"
           />
 
@@ -252,7 +313,7 @@ export default async function DashboardPage() {
             title="Account Role"
             value={roleName}
             description="Your assigned role and access level"
-            icon={ShieldCheck}
+            icon="shield"
             accent="green"
           />
 
@@ -260,13 +321,12 @@ export default async function DashboardPage() {
             title="Application"
             value="ERP System"
             description="Your business management workspace"
-            icon={Building2}
+            icon="building"
             accent="teal"
           />
         </div>
       </section>
 
-      {/* User statistics: requires users -> View */}
       {canViewUsers === true && (
         <section className="space-y-4">
           <div>
@@ -286,7 +346,6 @@ export default async function DashboardPage() {
         </section>
       )}
 
-      {/* Financial analytics: requires dashboard -> View */}
       <section className="space-y-4">
         <div>
           <div className="flex items-center gap-2">
@@ -304,13 +363,12 @@ export default async function DashboardPage() {
         <DashboardAnalytics />
       </section>
 
-      {/* Footer */}
       <section className="erp-card overflow-hidden">
         <div className="h-1.5 bg-gradient-to-r from-sky-500 via-cyan-400 to-emerald-500" />
 
         <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-center sm:p-8">
           <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-[var(--erp-blue-light)] text-[var(--erp-primary)]">
-            <ShieldCheck size={28} strokeWidth={1.7} />
+            <Icon name="shield" size={28} strokeWidth={1.7} />
           </div>
 
           <div>

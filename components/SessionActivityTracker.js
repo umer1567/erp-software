@@ -6,13 +6,13 @@ import { usePathname } from "next/navigation";
 
 const IDLE_TIMEOUT = 25 * 60 * 1000;
 const ACTIVITY_SYNC_INTERVAL = 60 * 1000;
+const ACTIVITY_CHECK_INTERVAL = 15 * 1000;
 const ACTIVITY_STORAGE_KEY = "erp_last_user_activity";
 
 export default function SessionActivityTracker() {
   const pathname = usePathname();
 
   useEffect(() => {
-    // Never track activity on login or other public pages.
     if (
       !pathname ||
       !(pathname === "/dashboard" || pathname.startsWith("/dashboard/"))
@@ -21,9 +21,12 @@ export default function SessionActivityTracker() {
     }
 
     let idleTimer = null;
+    let activityInterval = null;
     let lastSentAt = 0;
     let isLoggingOut = false;
+    let requestInProgress = false;
 
+    // Read the saved activity timestamp.
     const getLastActivity = () => {
       const stored = Number(
         localStorage.getItem(ACTIVITY_STORAGE_KEY)
@@ -31,53 +34,71 @@ export default function SessionActivityTracker() {
 
       return Number.isFinite(stored) && stored > 0
         ? stored
-        : Date.now();
+        : 0;
     };
 
-    const logout = async () => {
+    // Redirect when the server confirms that the session has expired.
+    const redirectToLogin = () => {
       if (isLoggingOut) return;
 
       isLoggingOut = true;
+
       clearTimeout(idleTimer);
+      clearInterval(activityInterval);
 
       localStorage.removeItem(ACTIVITY_STORAGE_KEY);
 
-      try {
-        await fetch("/api/auth/logout", {
-          method: "POST",
-          credentials: "same-origin",
-          cache: "no-store",
-        });
-      } catch (error) {
-        console.error("Automatic logout error:", error);
-      } finally {
-        window.location.replace("/login?reason=session_expired");
-      }
+      window.location.replace("/login?reason=session_expired");
     };
 
+    // Calculate and schedule the remaining idle time.
     const scheduleIdleLogout = () => {
       clearTimeout(idleTimer);
 
-      const elapsed = Date.now() - getLastActivity();
-      const remaining = Math.max(0, IDLE_TIMEOUT - elapsed);
+      if (isLoggingOut) return;
+
+      const lastActivity = getLastActivity();
+
+      if (!lastActivity) {
+        redirectToLogin();
+        return;
+      }
+
+      const elapsed = Date.now() - lastActivity;
+      const remaining = IDLE_TIMEOUT - elapsed;
+
+      if (remaining <= 0) {
+        redirectToLogin();
+        return;
+      }
 
       idleTimer = setTimeout(() => {
-        if (Date.now() - getLastActivity() >= IDLE_TIMEOUT) {
-          logout();
-        } else {
-          scheduleIdleLogout();
-        }
+        scheduleIdleLogout();
       }, remaining);
     };
 
+    // Renew the database session activity.
     const renewServerActivity = async () => {
-      const now = Date.now();
+      if (isLoggingOut || requestInProgress) return;
 
+      const now = Date.now();
+      const lastActivity = getLastActivity();
+
+      // Never renew an idle session.
+      if (
+        !lastActivity ||
+        now - lastActivity >= IDLE_TIMEOUT
+      ) {
+        scheduleIdleLogout();
+        return;
+      }
+
+      // Do not send requests more frequently than necessary.
       if (now - lastSentAt < ACTIVITY_SYNC_INTERVAL) {
         return;
       }
 
-      lastSentAt = now;
+      requestInProgress = true;
 
       try {
         const response = await fetch("/api/auth/activity", {
@@ -85,20 +106,37 @@ export default function SessionActivityTracker() {
           credentials: "same-origin",
           cache: "no-store",
           headers: {
+            Accept: "application/json",
             "Content-Type": "application/json",
           },
           body: JSON.stringify({}),
         });
 
         if (response.status === 401) {
-          await logout();
+          redirectToLogin();
+          return;
         }
+
+        if (!response.ok) {
+          console.error(
+            "Unable to renew session activity:",
+            response.status
+          );
+          return;
+        }
+
+        lastSentAt = Date.now();
       } catch (error) {
-        // Network errors do not renew the server-side session.
-        console.error("Session activity request failed:", error);
+        console.error(
+          "Session activity request failed:",
+          error
+        );
+      } finally {
+        requestInProgress = false;
       }
     };
 
+    // Record genuine user interaction.
     const handleActivity = () => {
       if (isLoggingOut) return;
 
@@ -113,15 +151,43 @@ export default function SessionActivityTracker() {
       renewServerActivity();
     };
 
+    // Synchronize activity between browser tabs.
     const handleStorage = (event) => {
       if (event.key === ACTIVITY_STORAGE_KEY) {
-        scheduleIdleLogout();
+        if (event.newValue) {
+          scheduleIdleLogout();
+          renewServerActivity();
+        } else {
+          redirectToLogin();
+        }
       }
 
       if (event.key === null) {
-        scheduleIdleLogout();
+        redirectToLogin();
       }
     };
+
+    // Recheck the session when the browser tab becomes active.
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        scheduleIdleLogout();
+        renewServerActivity();
+      }
+    };
+
+    const handlePageShow = () => {
+      scheduleIdleLogout();
+      renewServerActivity();
+    };
+
+    // Do not reset an existing activity timestamp on refresh.
+    // If no timestamp exists, initialize it once.
+    if (!getLastActivity()) {
+      localStorage.setItem(
+        ACTIVITY_STORAGE_KEY,
+        String(Date.now())
+      );
+    }
 
     scheduleIdleLogout();
 
@@ -139,15 +205,39 @@ export default function SessionActivityTracker() {
     });
 
     window.addEventListener("storage", handleStorage);
+    document.addEventListener(
+      "visibilitychange",
+      handleVisibilityChange
+    );
+    window.addEventListener("pageshow", handlePageShow);
+
+    // Check periodically and renew only if recent user activity exists.
+    activityInterval = setInterval(() => {
+      if (isLoggingOut) return;
+
+      scheduleIdleLogout();
+      renewServerActivity();
+    }, ACTIVITY_CHECK_INTERVAL);
 
     return () => {
       clearTimeout(idleTimer);
+      clearInterval(activityInterval);
 
       events.forEach((eventName) => {
-        window.removeEventListener(eventName, handleActivity);
+        window.removeEventListener(
+          eventName,
+          handleActivity
+        );
       });
 
       window.removeEventListener("storage", handleStorage);
+
+      document.removeEventListener(
+        "visibilitychange",
+        handleVisibilityChange
+      );
+
+      window.removeEventListener("pageshow", handlePageShow);
     };
   }, [pathname]);
 

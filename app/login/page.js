@@ -1,3 +1,4 @@
+
 "use client";
 
 import { Suspense, useState } from "react";
@@ -6,6 +7,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, Building2 } from "lucide-react";
 
 const SELECTED_COMPANY_KEY = "erp-selected-company";
+const ACTIVITY_STORAGE_KEY = "erp_last_user_activity";
 
 function LoginForm() {
   const router = useRouter();
@@ -24,12 +26,15 @@ function LoginForm() {
 
   const forgotPasswordHref = initialCompanyId
     ? `/forgot-password?companyId=${encodeURIComponent(
-      initialCompanyId
-    )}&companyName=${encodeURIComponent(initialCompanyName)}`
+        initialCompanyId
+      )}&companyName=${encodeURIComponent(initialCompanyName)}`
     : "/forgot-password";
 
   async function handleLogin(event) {
     event.preventDefault();
+
+    if (loading) return;
+
     setError("");
 
     if (!username.trim() || !password) {
@@ -61,28 +66,37 @@ function LoginForm() {
 
       const data = await response.json().catch(() => ({}));
 
+      // Company selection is required.
       if (
         response.status === 409 &&
         data.code === "COMPANY_SELECTION_REQUIRED" &&
         Array.isArray(data.companies)
       ) {
         const uniqueCompanies = [
-  ...new Map(
-    data.companies
-      .filter((company) => company.company_name?.trim())
-      .map((company) => [
-        company.company_name.trim().replace(/\s+/g, " ").toLowerCase(),
-        {
-          ...company,
-          company_name: company.company_name.trim().replace(/\s+/g, " "),
-        },
-      ])
-  ).values(),
-];
+          ...new Map(
+            data.companies
+              .filter((company) => company.company_name?.trim())
+              .map((company) => {
+                const companyName = company.company_name
+                  .trim()
+                  .replace(/\s+/g, " ");
 
-setCompanies(uniqueCompanies);
-setSelectedCompanyId("");
-setError("Please select the company you want to access.");
+                return [
+                  companyName.toLowerCase(),
+                  {
+                    ...company,
+                    company_name: companyName,
+                  },
+                ];
+              })
+          ).values(),
+        ];
+
+        setCompanies(uniqueCompanies);
+        setSelectedCompanyId("");
+        setError("Please select the company you want to access.");
+
+        return;
       }
 
       if (!response.ok) {
@@ -93,9 +107,7 @@ setError("Please select the company you want to access.");
       }
 
       if (!data.user?.companyId) {
-        setError(
-          "Login succeeded, but company information is missing."
-        );
+        setError("Login succeeded, but company information is missing.");
         return;
       }
 
@@ -106,13 +118,25 @@ setError("Please select the company you want to access.");
       if (initialCompanyId || selectedCompanyId) {
         localStorage.setItem(
           SELECTED_COMPANY_KEY,
-          JSON.stringify({ companyId, companyName })
+          JSON.stringify({
+            companyId,
+            companyName,
+          })
         );
       } else {
         localStorage.removeItem(SELECTED_COMPANY_KEY);
       }
 
-      // Successful login opens the dashboard.
+      // IMPORTANT:
+      // Start a fresh idle timer for the newly authenticated session.
+      // This prevents an old expired-session timestamp from logging
+      // out the user immediately after a successful login.
+      localStorage.setItem(
+        ACTIVITY_STORAGE_KEY,
+        String(Date.now())
+      );
+
+      // Load a fresh dashboard document with the newly issued cookie.
       window.location.replace("/dashboard");
     } catch (error) {
       console.error("Login failed:", error);

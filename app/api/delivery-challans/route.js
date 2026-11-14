@@ -178,8 +178,13 @@ export async function GET() {
         const context = await getContext();
         await checkPermission(context, "view");
 
-        const [challansResult, customersResult, warehousesResult, companyResult] =
-            await Promise.all([
+        const [
+    challansResult,
+    customersResult,
+    warehousesResult,
+    companyResult,
+    productsResult,
+] = await Promise.all([
                 pool.query(
                     `
                     SELECT
@@ -250,14 +255,32 @@ export async function GET() {
                     `,
                     [context.companyId]
                 ),
+
+                pool.query(
+    `
+    SELECT
+        product_id,
+        sku,
+        product_name,
+        description,
+        sales_unit,
+        unit,
+        sale_price
+    FROM products
+    WHERE is_active = TRUE
+    ORDER BY product_name
+    `
+),
+
             ]);
 
         return NextResponse.json({
-            success: true,
-            challans: challansResult.rows,
-            customers: customersResult.rows,
-            warehouses: warehousesResult.rows,
-            company: companyResult.rows[0] || null,
+    success: true,
+    challans: challansResult.rows,
+    customers: customersResult.rows,
+    warehouses: warehousesResult.rows,
+    products: productsResult.rows,
+    company: companyResult.rows[0] || null,
             permissions: {
                 canView: true,
                 canCreate: await hasPermission(
