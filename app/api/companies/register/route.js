@@ -2,11 +2,10 @@
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import pool, { CENTRAL_DATABASE_NAME, provisionCompanyDatabase } from "@/lib/db";
-// import {
-//     companyDatabaseName,
-//     companyDatabaseNameError,
-// } from "@/lib/tenant-tables";
-
+import {
+    companyDatabaseName,
+    companyDatabaseNameError,
+} from "@/lib/tenant-tables";
 import { getCurrentUser } from "@/lib/auth";
 import { hasPermission } from "@/lib/permissions";
 
@@ -761,10 +760,10 @@ export async function POST(request) {
     }
 
     // The company's database is named after it (erp_<name>).
-    // const companyNameError = companyDatabaseNameError(
-    //     companyName,
-    //     CENTRAL_DATABASE_NAME
-    // );
+    const companyNameError = companyDatabaseNameError(
+        companyName,
+        CENTRAL_DATABASE_NAME
+    );
 
     if (companyNameError) {
         return jsonError(companyNameError);
