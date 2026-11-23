@@ -1,7 +1,8 @@
 
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
-import pool from "@/lib/db";
+// import pool from "@/lib/db";
+import pool, { CENTRAL_DATABASE_NAME } from "@/lib/db";
 import {
   createSession,
   createToken,
