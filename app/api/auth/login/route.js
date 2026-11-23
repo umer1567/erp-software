@@ -333,34 +333,39 @@ const user = matchingUsers.find(
 
     // 8b. The company's own database must be ready before login.
 
-    const companyDatabaseResult = await pool.query(
-      `
-        SELECT status
-        FROM company_databases
-        WHERE company_id = $1
-        LIMIT 1
-      `,
-      [finalCompanyId]
-    );
+    // const companyDatabaseResult = await pool.query(
+    //   `
+    //     SELECT status
+    //     FROM company_databases
+    //     WHERE company_id = $1
+    //     LIMIT 1
+    //   `,
+    //   [finalCompanyId]
+    // );
 
-    const companyDatabaseStatus =
-      companyDatabaseResult.rows[0]?.status || null;
+    // const companyDatabaseStatus =
+    //   companyDatabaseResult.rows[0]?.status || null;
 
-    if (companyDatabaseStatus !== "ACTIVE") {
-      responseStatus = 503;
+    // if (companyDatabaseStatus !== "ACTIVE") {
+    //   responseStatus = 503;
 
-      return jsonResponse(
-        {
-          success: false,
-          code: "COMPANY_DATABASE_NOT_READY",
-          message:
-            companyDatabaseStatus === "PROVISIONING"
-              ? "This company's database is still being set up. Please try again shortly."
-              : "This company's database is not available. Please contact support.",
-        },
-        503
-      );
-    }
+    //   return jsonResponse(
+    //     {
+    //       success: false,
+    //       code: "COMPANY_DATABASE_NOT_READY",
+    //       message:
+    //         companyDatabaseStatus === "PROVISIONING"
+    //           ? "This company's database is still being set up. Please try again shortly."
+    //           : "This company's database is not available. Please contact support.",
+    //     },
+    //     503
+    //   );
+    // }
+
+    console.info("[AUTH] Company authenticated using central database:", {
+  companyId: finalCompanyId,
+  database: CENTRAL_DATABASE_NAME,
+});
 
     // 9. Update last login and insert login history.
 
