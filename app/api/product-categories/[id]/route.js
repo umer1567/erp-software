@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getTenantContext, unauthorizedResponse } from "@/lib/tenant";
 import { getCurrentUser } from "@/lib/auth";
 import { hasPermission } from "@/lib/permissions";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -88,6 +89,7 @@ export async function PUT(request, { params }) {
          is_active = $3,
          updated_at = CURRENT_TIMESTAMP
        WHERE category_id = $4
+       AND deleted_at IS NULL
        RETURNING
          category_id,
          category_name,
@@ -117,48 +119,36 @@ export async function PUT(request, { params }) {
   }
 }
 
+
+
 export async function DELETE(request, { params }) {
   try {
-    const denied = await authorize("delete");
-    if (denied) return denied;
+    const access = await authorize("delete");
+    if (access) return access;
 
     const tenant = await getTenantContext();
     if (!tenant) return unauthorizedResponse();
-    const { db } = tenant;
 
     const { id } = await params;
-    const categoryId = Number(id);
 
-    if (!Number.isSafeInteger(categoryId) || categoryId <= 0) {
-      return jsonError("Invalid category ID.", 400);
-    }
+    const result = await archiveAndSoftDelete(tenant, {
+      moduleKey: "product_categories",
+      recordId: id,
+    });
 
-    const result = await db.query(
-      `DELETE FROM product_categories
-       WHERE category_id = $1
-       RETURNING category_id, category_name`,
-      [categoryId]
-    );
-
-    if (result.rowCount === 0) {
-      return jsonError("Category not found.", 404);
+    if (!result.success) {
+      return jsonError(result.message, result.status);
     }
 
     return NextResponse.json({
       success: true,
-      message: "Category deleted successfully.",
-      category: result.rows[0],
+      message: "Category moved to Recycle Bin successfully.",
+      recycleBinId: result.archiveId,
+      category: result.record,
     });
   } catch (error) {
     console.error("DELETE product category:", error);
 
-    if (error.code === "23503") {
-      return jsonError(
-        "This category is being used by products and cannot be deleted.",
-        409
-      );
-    }
-
-    return jsonError("Failed to delete category.", 500);
+    return jsonError("Failed to archive category.", 500);
   }
 }

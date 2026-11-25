@@ -1,6 +1,9 @@
 
 import { NextResponse } from "next/server";
-import { getTenantContext, unauthorizedResponse } from "@/lib/tenant";
+import {
+  getTenantContext,
+  unauthorizedResponse,
+} from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +14,7 @@ export async function PUT(request, { params }) {
   try {
     const tenant = await getTenantContext();
     if (!tenant) return unauthorizedResponse();
+
     const { db } = tenant;
     client = await db.connect();
 
@@ -19,10 +23,7 @@ export async function PUT(request, { params }) {
 
     if (!Number.isInteger(customerId) || customerId <= 0) {
       return NextResponse.json(
-        {
-          success: false,
-          message: "Invalid customer ID.",
-        },
+        { success: false, message: "Invalid customer ID." },
         { status: 400 }
       );
     }
@@ -64,6 +65,7 @@ export async function PUT(request, { params }) {
         is_active = $8,
         updated_at = CURRENT_TIMESTAMP
       WHERE customer_id = $9
+        AND deleted_at IS NULL
       RETURNING *
       `,
       [
@@ -81,10 +83,7 @@ export async function PUT(request, { params }) {
 
     if (result.rowCount === 0) {
       return NextResponse.json(
-        {
-          success: false,
-          message: "Customer not found.",
-        },
+        { success: false, message: "Customer not found." },
         { status: 404 }
       );
     }
@@ -120,14 +119,18 @@ export async function PUT(request, { params }) {
   }
 }
 
-// Delete an existing customer
+// Soft-delete customer and archive it in Recycle Bin
 export async function DELETE(request, { params }) {
   let client;
+  let transactionStarted = false;
 
   try {
     const tenant = await getTenantContext();
+
     if (!tenant) return unauthorizedResponse();
-    const { db } = tenant;
+
+    const { db, companyId, user } = tenant;
+
     client = await db.connect();
 
     const { id } = await params;
@@ -135,47 +138,144 @@ export async function DELETE(request, { params }) {
 
     if (!Number.isInteger(customerId) || customerId <= 0) {
       return NextResponse.json(
-        {
-          success: false,
-          message: "Invalid customer ID.",
-        },
+        { success: false, message: "Invalid customer ID." },
         { status: 400 }
       );
     }
 
-    const result = await client.query(
+    const deletedBy =
+      user?.userId ??
+      user?.user_id ??
+      user?.id ??
+      null;
+
+    await client.query("BEGIN");
+    transactionStarted = true;
+
+    // Lock the active customer before archiving.
+    const customerResult = await client.query(
       `
-      DELETE FROM customers
+      SELECT *
+      FROM customers
       WHERE customer_id = $1
-      RETURNING customer_id, customer_name, customer_code
+        AND deleted_at IS NULL
+      FOR UPDATE
       `,
       [customerId]
     );
 
-    if (result.rowCount === 0) {
+    if (customerResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      transactionStarted = false;
+
       return NextResponse.json(
         {
           success: false,
-          message: "Customer not found.",
+          message: "Customer not found or already deleted.",
         },
         { status: 404 }
       );
     }
 
+    const customer = customerResult.rows[0];
+
+    const recordLabel =
+      customer.customer_name || `Customer ${customerId}`;
+
+    // Save the complete original customer record.
+    const archiveResult = await client.query(
+      `
+      INSERT INTO recycle_bin_items (
+        company_id,
+        module_key,
+        source_table,
+        source_record_id,
+        record_label,
+        deleted_by,
+        deleted_at,
+        deletion_reason,
+        record_snapshot,
+        relationship_snapshot
+      )
+      VALUES (
+        $1,
+        'customers',
+        'customers',
+        $2,
+        $3,
+        $4,
+        CURRENT_TIMESTAMP,
+        $5,
+        $6::jsonb,
+        '[]'::jsonb
+      )
+      RETURNING recycle_bin_id
+      `,
+      [
+        companyId,
+        String(customerId),
+        recordLabel,
+        deletedBy,
+        "Customer deleted from Customers module",
+        JSON.stringify(customer),
+      ]
+    );
+
+    // Only mark the customer deleted after successful archiving.
+    await client.query(
+      `
+      UPDATE customers
+      SET
+        deleted_at = CURRENT_TIMESTAMP,
+        deleted_by = $1,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE customer_id = $2
+        AND deleted_at IS NULL
+      `,
+      [deletedBy, customerId]
+    );
+
+    await client.query("COMMIT");
+    transactionStarted = false;
+
     return NextResponse.json({
       success: true,
-      message: "Customer deleted successfully.",
-      customer: result.rows[0],
+      message: "Customer moved to Recycle Bin successfully.",
+      customer: {
+        customer_id: customer.customer_id,
+        customer_name: customer.customer_name,
+        customer_code: customer.customer_code,
+      },
+      recycleBinId: archiveResult.rows[0].recycle_bin_id,
     });
   } catch (error) {
+    if (client && transactionStarted) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error("CUSTOMER DELETE ROLLBACK ERROR:", rollbackError);
+      }
+    }
+
     console.error("CUSTOMERS DELETE ERROR:", error);
+
+    if (error.code === "23505") {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "This customer already has an archive entry.",
+          error: error.message,
+        },
+        { status: 409 }
+      );
+    }
 
     if (error.code === "23503") {
       return NextResponse.json(
         {
           success: false,
-          message:
-            "This customer is linked to existing invoices or payments and cannot be deleted.",
+          message: "Customer is linked to existing records.",
+          error: error.message,
         },
         { status: 409 }
       );
@@ -184,7 +284,7 @@ export async function DELETE(request, { params }) {
     return NextResponse.json(
       {
         success: false,
-        message: "Failed to delete customer.",
+        message: "Failed to move customer to Recycle Bin.",
         error: error.message,
       },
       { status: 500 }

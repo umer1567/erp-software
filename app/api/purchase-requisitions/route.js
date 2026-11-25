@@ -41,30 +41,36 @@ export async function GET(request) {
             );
         }
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
-
         const { searchParams } = new URL(request.url);
         const id = searchParams.get("id");
 
         /*
-         * Get a specific requisition.
-         *
-         * Deliberately does not hide converted requisitions here.
-         * Original records must remain accessible for audit/history.
+         * Get a specific active requisition.
+         * Archived requisitions must only be accessed through Recycle Bin.
          */
         if (id) {
+            if (!/^\d+$/.test(id) || Number(id) <= 0) {
+                return NextResponse.json(
+                    { success: false, message: "Invalid requisition ID." },
+                    { status: 400 }
+                );
+            }
+
             const result = await db.query(
-                `SELECT
+                `
+                SELECT
                     pr.*,
                     w.warehouse_name,
                     w.warehouse_code
-                 FROM purchase_requisitions pr
-                 LEFT JOIN warehouses w
+                FROM purchase_requisitions pr
+                LEFT JOIN warehouses w
                     ON w.warehouse_id = pr.warehouse_id
-                 WHERE pr.requisition_id = $1
-                   AND pr.company_id = $2`,
-                [id, user.companyId]
+                WHERE pr.requisition_id = $1
+                  AND pr.company_id = $2
+                  AND pr.deleted_at IS NULL
+                `,
+                [Number(id), user.companyId]
             );
 
             if (!result.rows.length) {
@@ -79,40 +85,49 @@ export async function GET(request) {
 
             const requisition = result.rows[0];
 
-            // User names come from the central database.
             await attachUserNames(requisition, {
                 created_by: "created_by_name",
                 updated_by: "updated_by_name",
             });
 
+            /*
+             * Keep historical product information visible in the
+             * requisition detail, even if a product is later archived.
+             */
             const [items, related, attachments] = await Promise.all([
                 db.query(
-                    `SELECT
+                    `
+                    SELECT
                         ri.*,
                         p.sku,
                         p.product_name
-                     FROM purchase_requisition_items ri
-                     LEFT JOIN products p
+                    FROM purchase_requisition_items ri
+                    LEFT JOIN products p
                         ON p.product_id = ri.product_id
-                     WHERE ri.requisition_id = $1
-                     ORDER BY ri.requisition_item_id`,
-                    [id]
+                    WHERE ri.requisition_id = $1
+                    ORDER BY ri.requisition_item_id
+                    `,
+                    [Number(id)]
                 ),
 
                 db.query(
-                    `SELECT *
-                     FROM purchase_requisition_related_transactions
-                     WHERE requisition_id = $1
-                     ORDER BY related_transaction_id`,
-                    [id]
+                    `
+                    SELECT *
+                    FROM purchase_requisition_related_transactions
+                    WHERE requisition_id = $1
+                    ORDER BY related_transaction_id
+                    `,
+                    [Number(id)]
                 ),
 
                 db.query(
-                    `SELECT *
-                     FROM purchase_requisition_attachments
-                     WHERE requisition_id = $1
-                     ORDER BY attachment_id`,
-                    [id]
+                    `
+                    SELECT *
+                    FROM purchase_requisition_attachments
+                    WHERE requisition_id = $1
+                    ORDER BY attachment_id
+                    `,
+                    [Number(id)]
                 ),
             ]);
 
@@ -130,16 +145,16 @@ export async function GET(request) {
         /*
          * Main history list.
          *
-         * An item is considered converted into an RFQ when an
-         * rfq_items record references its original requisition item.
+         * An item is converted into an RFQ when an rfq_items record
+         * references its original requisition item.
          *
          * Keep partially converted requisitions visible.
          * Hide a requisition only when ALL its items have RFQs.
-         *
-         * Requisitions without items are also kept visible.
+         * Requisitions without items remain visible.
          */
         const result = await db.query(
-            `WITH item_summary AS (
+            `
+            WITH item_summary AS (
                 SELECT
                     ri.requisition_id,
 
@@ -172,7 +187,6 @@ export async function GET(request) {
                     )::INTEGER AS remaining_item_count
 
                 FROM purchase_requisition_items ri
-
                 GROUP BY ri.requisition_id
             )
 
@@ -237,22 +251,20 @@ export async function GET(request) {
                 ON item_summary.requisition_id =
                     pr.requisition_id
 
-            WHERE
-                pr.company_id = $1
-
-                AND (
+            WHERE pr.company_id = $1
+              AND pr.deleted_at IS NULL
+              AND (
                     item_summary.requisition_id IS NULL
-
                     OR item_summary.remaining_item_count > 0
-                )
+              )
 
             ORDER BY
                 pr.transaction_date DESC,
-                pr.requisition_id DESC`,
+                pr.requisition_id DESC
+            `,
             [user.companyId]
         );
 
-        // User names come from the central database.
         await attachUserNames(result.rows, {
             created_by: "created_by_name",
         });
@@ -366,18 +378,23 @@ export async function POST(request) {
             }
         }
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
         client = await db.connect();
 
         await client.query("BEGIN");
         transactionStarted = true;
 
+        /*
+         * Archived warehouses cannot be selected for new requisitions.
+         */
         const warehouse = await client.query(
-            `SELECT warehouse_id
-             FROM warehouses
-             WHERE warehouse_id = $1
-               AND is_active = TRUE`,
+            `
+            SELECT warehouse_id
+            FROM warehouses
+            WHERE warehouse_id = $1
+              AND is_active = TRUE
+              AND deleted_at IS NULL
+            `,
             [warehouseId]
         );
 
@@ -386,19 +403,22 @@ export async function POST(request) {
         }
 
         const numberResult = await client.query(
-            `SELECT
+            `
+            SELECT
                 'RQ' || LPAD(
                     nextval('purchase_requisition_number_seq')::TEXT,
                     6,
                     '0'
-                ) AS transaction_number`
+                ) AS transaction_number
+            `
         );
 
         const transactionNumber =
             numberResult.rows[0].transaction_number;
 
         const header = await client.query(
-            `INSERT INTO purchase_requisitions (
+            `
+            INSERT INTO purchase_requisitions (
                 company_id,
                 transaction_number,
                 transaction_date,
@@ -411,11 +431,12 @@ export async function POST(request) {
                 reference_number,
                 created_by,
                 updated_by
-             )
-             VALUES (
+            )
+            VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11
-             )
-             RETURNING *`,
+            )
+            RETURNING *
+            `,
             [
                 user.companyId,
                 transactionNumber,
@@ -434,24 +455,31 @@ export async function POST(request) {
         const requisition = header.rows[0];
 
         for (const item of items) {
+            /*
+             * Archived products cannot be added to new requisitions.
+             */
             const product = await client.query(
-                `SELECT product_id, product_name, unit
-                 FROM products
-                 WHERE product_id = $1
-                   AND is_active = TRUE`,
+                `
+                SELECT product_id, product_name, unit
+                FROM products
+                WHERE product_id = $1
+                  AND is_active = TRUE
+                  AND deleted_at IS NULL
+                `,
                 [item.productId]
             );
 
             if (!product.rows.length) {
                 throw new Error(
-                    `Invalid or inactive product: ${item.productId}`
+                    `Invalid, inactive, or archived product: ${item.productId}`
                 );
             }
 
             const productData = product.rows[0];
 
             await client.query(
-                `INSERT INTO purchase_requisition_items (
+                `
+                INSERT INTO purchase_requisition_items (
                     requisition_id,
                     product_id,
                     item_description,
@@ -459,8 +487,9 @@ export async function POST(request) {
                     uom,
                     quantity,
                     memo
-                 )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                `,
                 [
                     requisition.requisition_id,
                     item.productId,
@@ -503,13 +532,11 @@ export async function POST(request) {
 
         console.error("POST purchase requisition:", error);
 
-        const clientErrorMessages = [
-            "Selected location is unavailable.",
-        ];
-
         const isClientError =
-            clientErrorMessages.includes(error.message) ||
-            error.message.startsWith("Invalid or inactive product:");
+            error.message === "Selected location is unavailable." ||
+            error.message.startsWith(
+                "Invalid, inactive, or archived product:"
+            );
 
         return NextResponse.json(
             {

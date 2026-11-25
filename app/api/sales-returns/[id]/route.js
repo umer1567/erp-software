@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { getOperationalPool } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export const dynamic = "force-dynamic";
 
@@ -172,8 +173,9 @@ async function calculateManualItems(client, items) {
         const productResult = await client.query(
             `
             SELECT product_id, product_name, unit
-            FROM products
-            WHERE product_id = $1
+FROM products
+WHERE product_id = $1
+  AND deleted_at IS NULL
             `,
             [productId]
         );
@@ -530,11 +532,15 @@ export async function GET(request, context) {
             LEFT JOIN sales_invoices si
                 ON si.invoice_id = sr.invoice_id
             LEFT JOIN customers c
-                ON c.customer_id = sr.customer_id
-            LEFT JOIN warehouses w
-                ON w.warehouse_id = sr.warehouse_id
+    ON c.customer_id = sr.customer_id
+   AND c.deleted_at IS NULL
+
+LEFT JOIN warehouses w
+    ON w.warehouse_id = sr.warehouse_id
+   AND w.deleted_at IS NULL
             WHERE sr.return_id = $1
               AND sr.company_id = $2
+              AND sr.deleted_at IS NULL
             `,
             [returnId, auth.companyId]
         );
@@ -678,6 +684,7 @@ export async function PUT(request, context) {
             FROM sales_returns
             WHERE return_id = $1
               AND company_id = $2
+              AND deleted_at IS NULL
             FOR UPDATE
             `,
             [returnId, auth.companyId]
@@ -834,10 +841,12 @@ export async function PUT(request, context) {
  * DELETE /api/sales-returns/[id]
  * Delete a DRAFT Sales Return only.
  */
+/**
+ * DELETE /api/sales-returns/[id]
+ * Only DRAFT Sales Returns can be archived.
+ * Return items remain in place for restoration.
+ */
 export async function DELETE(request, context) {
-    let client = null;
-    let transactionStarted = false;
-
     try {
         const auth = await getAuthorizedUser("delete");
 
@@ -846,83 +855,59 @@ export async function DELETE(request, context) {
         }
 
         const db = await getOperationalPool(auth.companyId);
-
         const returnId = await getReturnId(context);
 
         if (!Number.isInteger(returnId) || returnId <= 0) {
             return errorResponse("Invalid Sales Return ID.");
         }
 
-        client = await db.connect();
+        const result = await archiveAndSoftDelete(
+            {
+                db,
+                companyId: auth.companyId,
+                user: {
+                    userId:
+                        auth.user?.userId ??
+                        auth.user?.user_id ??
+                        auth.user?.id,
+                },
+            },
+            {
+                moduleKey: "sales_returns",
+                recordId: returnId,
+                deletionReason: "Draft Sales Return archived",
+                validateRecord: async (_client, record) => {
+                    if (String(record.status).toUpperCase() !== "DRAFT") {
+                        return {
+                            status: 409,
+                            message: "Only DRAFT Sales Returns can be archived.",
+                        };
+                    }
 
-        await client.query("BEGIN");
-        transactionStarted = true;
-
-        const result = await client.query(
-            `
-            SELECT return_id, status
-            FROM sales_returns
-            WHERE return_id = $1
-              AND company_id = $2
-            FOR UPDATE
-            `,
-            [returnId, auth.companyId]
+                    return null;
+                },
+            }
         );
 
-        if (!result.rowCount) {
-            throw Object.assign(
-                new Error("Sales Return not found."),
-                { statusCode: 404 }
-            );
+        if (!result.success) {
+            return errorResponse(result.message, result.status);
         }
-
-        if (result.rows[0].status !== "DRAFT") {
-            throw Object.assign(
-                new Error("Only DRAFT Sales Returns can be deleted."),
-                { statusCode: 409 }
-            );
-        }
-
-        await client.query(
-            `
-            DELETE FROM sales_returns
-            WHERE return_id = $1
-              AND company_id = $2
-            `,
-            [returnId, auth.companyId]
-        );
-
-        await client.query("COMMIT");
-        transactionStarted = false;
 
         return NextResponse.json(
             {
                 success: true,
-                message: "Sales Return deleted successfully.",
+                message: "Draft Sales Return moved to the Recycle Bin.",
             },
             {
                 headers: { "Cache-Control": "no-store" },
             }
         );
     } catch (error) {
-        if (transactionStarted && client) {
-            try {
-                await client.query("ROLLBACK");
-            } catch (rollbackError) {
-                console.error(
-                    "Sales Return DELETE rollback error:",
-                    rollbackError
-                );
-            }
-        }
-
         console.error("Sales Return DELETE error:", error);
 
         return errorResponse(
-            error.message || "Failed to delete Sales Return.",
-            error.statusCode || 500
+            error.message || "Failed to archive Sales Return.",
+            500
         );
-    } finally {
-        if (client) client.release();
     }
 }

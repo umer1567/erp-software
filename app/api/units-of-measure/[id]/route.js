@@ -1,7 +1,7 @@
 
 import { NextResponse } from "next/server";
 import { getTenantContext, unauthorizedResponse } from "@/lib/tenant";
-
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -133,6 +133,7 @@ export async function PUT(request, { params }) {
           is_active = $4,
           updated_at = NOW()
         WHERE unit_id = $5
+        WHERE deleted_at IS NULL
         RETURNING
           unit_id,
           unit_code,
@@ -167,11 +168,11 @@ export async function PUT(request, { params }) {
 }
 
 // DELETE: Delete an existing unit
+
 export async function DELETE(request, { params }) {
   try {
     const tenant = await getTenantContext();
     if (!tenant) return unauthorizedResponse();
-    const { db } = tenant;
 
     const unitId = await getUnitId(params);
 
@@ -179,29 +180,25 @@ export async function DELETE(request, { params }) {
       return errorResponse("Invalid unit ID.", 400);
     }
 
-    const result = await db.query(
-      `
-        DELETE FROM units_of_measure
-        WHERE unit_id = $1
-        RETURNING unit_id, unit_code, unit_name
-      `,
-      [unitId]
-    );
+    const result = await archiveAndSoftDelete(tenant, {
+      moduleKey: "units_of_measure",
+      recordId: unitId,
+    });
 
-    if (result.rowCount === 0) {
-      return errorResponse("Unit not found.", 404);
+    if (!result.success) {
+      return errorResponse(result.message, result.status);
     }
 
     return NextResponse.json(
       {
-        message: `Unit "${result.rows[0].unit_code}" deleted successfully.`,
-        unit: result.rows[0],
+        success: true,
+        message: "Unit moved to Recycle Bin successfully.",
+        recycleBinId: result.archiveId,
+        unit: result.record,
       },
       {
         status: 200,
-        headers: {
-          "Cache-Control": "no-store",
-        },
+        headers: { "Cache-Control": "no-store" },
       }
     );
   } catch (error) {

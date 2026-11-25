@@ -109,6 +109,7 @@ export async function GET() {
           created_at,
           updated_at
         FROM units_of_measure
+        WHERE deleted_at IS NULL
         ORDER BY unit_code ASC
       `),
       hasPermission(roleId, PERMISSION_KEY, "create"),

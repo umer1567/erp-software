@@ -15,6 +15,11 @@ export async function GET(request) {
 
     const values = [];
     const conditions = [];
+    conditions.push(
+  "pu.deleted_at IS NULL",
+  "p.deleted_at IS NULL",
+  "w.deleted_at IS NULL"
+);
 
     if (productId) {
       values.push(productId);
@@ -105,9 +110,10 @@ export async function POST(request) {
     await client.query("BEGIN");
 
     const product = await client.query(
-      "SELECT product_id FROM products WHERE product_id = $1",
+      "SELECT product_id FROM products WHERE product_id = $1  AND deleted_at IS NULL",
       [productId]
     );
+
 
     if (product.rowCount === 0) {
       await client.query("ROLLBACK");
@@ -132,6 +138,7 @@ export async function POST(request) {
       INSERT INTO unit_stock (unit_id, warehouse_id, quantity)
       SELECT $1, warehouse_id, 0
       FROM warehouses
+      WHERE deleted_at IS NULL
       ON CONFLICT (unit_id, warehouse_id) DO NOTHING
       `,
       [result.rows[0].unit_id]

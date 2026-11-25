@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getTenantContext, unauthorizedResponse } from "@/lib/tenant";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export async function PUT(request, { params }) {
   try {
@@ -40,6 +41,7 @@ export async function PUT(request, { params }) {
         is_active = $5,
         updated_at = CURRENT_TIMESTAMP
       WHERE warehouse_id = $6
+      AND deleted_at IS NULL
       RETURNING *
       `,
       [
@@ -88,44 +90,47 @@ export async function PUT(request, { params }) {
   }
 }
 
+
+
 export async function DELETE(request, { params }) {
   try {
+    const access = await checkAccess(request, "delete");
+
+    if (!access.allowed) {
+      return NextResponse.json(
+        { success: false, message: access.message },
+        { status: access.status }
+      );
+    }
+
     const tenant = await getTenantContext();
     if (!tenant) return unauthorizedResponse();
-    const { db } = tenant;
 
     const { id } = await params;
 
-    const result = await db.query(
-      `
-      DELETE FROM warehouses
-      WHERE warehouse_id = $1
-      RETURNING warehouse_id
-      `,
-      [id]
-    );
+    const result = await archiveAndSoftDelete(tenant, {
+      moduleKey: "warehouses",
+      recordId: id,
+    });
 
-    if (result.rows.length === 0) {
+    if (!result.success) {
       return NextResponse.json(
-        {
-          message: "Warehouse not found.",
-        },
-        { status: 404 }
+        { success: false, message: result.message },
+        { status: result.status }
       );
     }
 
     return NextResponse.json({
       success: true,
-      message: "Warehouse deleted successfully.",
+      message: "Warehouse moved to Recycle Bin successfully.",
+      recycleBinId: result.archiveId,
+      warehouse: result.record,
     });
   } catch (error) {
     console.error("WAREHOUSE DELETE ERROR:", error);
 
     return NextResponse.json(
-      {
-        message: "Failed to delete warehouse.",
-        error: error.message,
-      },
+      { success: false, message: "Failed to archive warehouse." },
       { status: 500 }
     );
   }

@@ -1,3 +1,4 @@
+
 import { NextResponse } from "next/server";
 import pool, { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
@@ -5,23 +6,17 @@ import { requirePermission } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
-// ============================================================
-// HELPERS
-// ============================================================
+/* -------------------------------------------------------------------------- */
+/* Helpers                                                                    */
+/* -------------------------------------------------------------------------- */
 
 function positiveId(value) {
     const number = Number(value);
-
-    if (!Number.isInteger(number) || number <= 0) {
-        return null;
-    }
-
-    return number;
+    return Number.isInteger(number) && number > 0 ? number : null;
 }
 
 function validDate(value) {
-    if (!value) return false;
-    return /^\d{4}-\d{2}-\d{2}$/.test(String(value));
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
 }
 
 function validQuantity(value) {
@@ -34,39 +29,46 @@ function validCost(value) {
     return Number.isFinite(number) && number >= 0;
 }
 
+function validationError(message, status = 400) {
+    return NextResponse.json({ message }, { status });
+}
+
 function apiError(error) {
     console.error("ITEM RECEIPTS API ERROR:", error);
 
     if (error.message === "UNAUTHORIZED") {
-        return NextResponse.json(
-            { message: "You are not authorized. Please log in." },
-            { status: 401 }
+        return validationError(
+            "You are not authorized. Please log in.",
+            401
         );
     }
 
     if (error.message === "FORBIDDEN") {
-        return NextResponse.json(
-            { message: "You do not have permission to perform this action." },
-            { status: 403 }
+        return validationError(
+            "You do not have permission to perform this action.",
+            403
         );
     }
 
-    return NextResponse.json(
-        { message: error.message || "Internal server error." },
-        { status: 500 }
+    if (error.status) {
+        return validationError(error.message, error.status);
+    }
+
+    return validationError(
+        error.message || "Internal server error.",
+        500
     );
 }
 
-function validationError(message, status = 400) {
-    return NextResponse.json(
-        { message },
-        { status }
-    );
+function throwHttpError(message, status = 400) {
+    const error = new Error(message);
+    error.status = status;
+    throw error;
 }
 
-// ============================================================
-// GET: LIST ITEM RECEIPTS AND DROPDOWN DATA
-// ============================================================
+/* -------------------------------------------------------------------------- */
+/* GET: LIST ITEM RECEIPTS AND DROPDOWN DATA                                  */
+/* -------------------------------------------------------------------------- */
 
 export async function GET() {
     try {
@@ -76,16 +78,11 @@ export async function GET() {
             return validationError("Unauthorized.", 401);
         }
 
-        await requirePermission(
-            user,
-            "item_receipts",
-            "view"
+        await requirePermission(user, "item_receipts", "view");
+
+        const companyId = positiveId(
+            user.companyId || user.company_id
         );
-
-        // Operational data lives in the company's own database.
-        const db = await getTenantDb(user);
-
-        const companyId = positiveId(user.companyId);
 
         if (!companyId) {
             return validationError(
@@ -94,6 +91,8 @@ export async function GET() {
             );
         }
 
+        const db = await getTenantDb(user);
+
         const [
             receiptsResult,
             suppliersResult,
@@ -101,61 +100,61 @@ export async function GET() {
             purchaseOrdersResult,
             pendingReceiptsResult,
         ] = await Promise.all([
-
-            // ------------------------------------------------
-            // 1. ITEM RECEIPTS
-            // ------------------------------------------------
+            /* ------------------------------------------------------------ */
+            /* 1. Item Receipt history: hide archived receipts              */
+            /* ------------------------------------------------------------ */
 
             db.query(
-    `
-    SELECT
-        ir.*,
-        s.supplier_name,
-        w.warehouse_name,
-        po.purchase_order_number,
+                `
+                SELECT
+                    ir.*,
+                    s.supplier_name,
+                    w.warehouse_name,
+                    po.purchase_order_number,
 
-        COALESCE(receipt_totals.item_count, 0)::INTEGER
-            AS item_count,
+                    COALESCE(
+                        receipt_totals.item_count,
+                        0
+                    )::INTEGER AS item_count,
 
-        COALESCE(receipt_totals.total_quantity, 0)
-            AS total_quantity
+                    COALESCE(
+                        receipt_totals.total_quantity,
+                        0
+                    ) AS total_quantity
 
-    FROM item_receipts ir
+                FROM item_receipts ir
 
-    LEFT JOIN suppliers s
-        ON s.supplier_id = ir.supplier_id
+                LEFT JOIN suppliers s
+                    ON s.supplier_id = ir.supplier_id
 
-    LEFT JOIN warehouses w
-        ON w.warehouse_id = ir.warehouse_id
+                LEFT JOIN warehouses w
+                    ON w.warehouse_id = ir.warehouse_id
 
-    LEFT JOIN purchase_orders po
-        ON po.purchase_order_id = ir.purchase_order_id
+                LEFT JOIN purchase_orders po
+                    ON po.purchase_order_id = ir.purchase_order_id
 
-    LEFT JOIN LATERAL (
-        SELECT
-            COUNT(*) AS item_count,
-            COALESCE(
-                SUM(iri.quantity_received),
-                0
-            ) AS total_quantity
+                LEFT JOIN LATERAL (
+                    SELECT
+                        COUNT(*) AS item_count,
+                        COALESCE(
+                            SUM(iri.quantity_received),
+                            0
+                        ) AS total_quantity
+                    FROM item_receipt_items iri
+                    WHERE iri.item_receipt_id = ir.item_receipt_id
+                ) receipt_totals ON TRUE
 
-        FROM item_receipt_items iri
+                WHERE ir.company_id = $1
+                  AND ir.deleted_at IS NULL
 
-        WHERE iri.item_receipt_id = ir.item_receipt_id
-    ) receipt_totals ON TRUE
+                ORDER BY ir.item_receipt_id DESC
+                `,
+                [companyId]
+            ),
 
-    WHERE ir.company_id = $1
-
-    ORDER BY
-        ir.item_receipt_id DESC
-    `,
-    [companyId]
-),
-
-            // ------------------------------------------------
-            // 2. ACTIVE SUPPLIERS
-            // Suppliers are shared in the current schema.
-            // ------------------------------------------------
+            /* ------------------------------------------------------------ */
+            /* 2. Active suppliers only                                      */
+            /* ------------------------------------------------------------ */
 
             db.query(
                 `
@@ -170,15 +169,15 @@ export async function GET() {
                 FROM suppliers
 
                 WHERE COALESCE(is_active, TRUE) = TRUE
+                  AND deleted_at IS NULL
 
                 ORDER BY supplier_name
                 `
             ),
 
-            // ------------------------------------------------
-            // 3. ACTIVE WAREHOUSES
-            // Warehouses are shared in the current schema.
-            // ------------------------------------------------
+            /* ------------------------------------------------------------ */
+            /* 3. Active warehouses only                                     */
+            /* ------------------------------------------------------------ */
 
             db.query(
                 `
@@ -191,16 +190,15 @@ export async function GET() {
                 FROM warehouses
 
                 WHERE COALESCE(is_active, TRUE) = TRUE
+                  AND deleted_at IS NULL
 
                 ORDER BY warehouse_name
                 `
             ),
 
-            // ------------------------------------------------
-            // 4. APPROVED PURCHASE ORDERS
-            // IMPORTANT: The correct column is currency_code.
-            // There is no po.currency column.
-            // ------------------------------------------------
+            /* ------------------------------------------------------------ */
+            /* 4. Approved, active Purchase Orders only                     */
+            /* ------------------------------------------------------------ */
 
             db.query(
                 `
@@ -223,16 +221,18 @@ export async function GET() {
 
                 WHERE po.company_id = $1
                   AND UPPER(COALESCE(po.status, '')) = 'APPROVED'
+                  AND po.deleted_at IS NULL
+                  AND COALESCE(s.is_active, TRUE) = TRUE
+                  AND s.deleted_at IS NULL
 
-                ORDER BY
-                    po.purchase_order_id DESC
+                ORDER BY po.purchase_order_id DESC
                 `,
                 [companyId]
             ),
 
-            // ------------------------------------------------
-            // 5. PENDING ITEM RECEIPTS
-            // ------------------------------------------------
+            /* ------------------------------------------------------------ */
+            /* 5. Active Pending Item Receipts only                          */
+            /* ------------------------------------------------------------ */
 
             db.query(
                 `
@@ -256,13 +256,22 @@ export async function GET() {
                     ON po.purchase_order_id = pir.purchase_order_id
 
                 WHERE pir.company_id = $1
+                  AND pir.deleted_at IS NULL
                   AND UPPER(COALESCE(pir.status, '')) NOT IN (
                       'CANCELLED',
                       'CLOSED'
                   )
+                  AND COALESCE(s.is_active, TRUE) = TRUE
+                  AND s.deleted_at IS NULL
+                  AND (
+                      pir.purchase_order_id IS NULL
+                      OR (
+                          po.deleted_at IS NULL
+                          AND UPPER(COALESCE(po.status, '')) = 'APPROVED'
+                      )
+                  )
 
-                ORDER BY
-                    pir.pending_item_receipt_id DESC
+                ORDER BY pir.pending_item_receipt_id DESC
                 `,
                 [companyId]
             ),
@@ -270,30 +279,23 @@ export async function GET() {
 
         return NextResponse.json({
             success: true,
-
             receipts: receiptsResult.rows,
-
             suppliers: suppliersResult.rows,
-
             warehouses: warehousesResult.rows,
-
             purchaseOrders: purchaseOrdersResult.rows,
-
             pendingReceipts: pendingReceiptsResult.rows,
         });
-
     } catch (error) {
         return apiError(error);
     }
 }
 
-// ============================================================
-// POST: CREATE ITEM RECEIPT
-// ============================================================
+/* -------------------------------------------------------------------------- */
+/* POST: CREATE ITEM RECEIPT                                                  */
+/* -------------------------------------------------------------------------- */
 
 export async function POST(request) {
     let client;
-
     let transactionStarted = false;
 
     try {
@@ -303,14 +305,15 @@ export async function POST(request) {
             return validationError("Unauthorized.", 401);
         }
 
-        await requirePermission(
-            user,
-            "item_receipts",
-            "create"
+        await requirePermission(user, "item_receipts", "create");
+
+        const companyId = positiveId(
+            user.companyId || user.company_id
         );
 
-        const companyId = positiveId(user.companyId);
-        const userId = positiveId(user.userId);
+        const userId = positiveId(
+            user.userId || user.user_id
+        );
 
         if (!companyId || !userId) {
             return validationError(
@@ -344,9 +347,9 @@ export async function POST(request) {
 
         const items = body.items;
 
-        // ----------------------------------------------------
-        // BASIC VALIDATION
-        // ----------------------------------------------------
+        /* ---------------------------------------------------------------- */
+        /* Basic validation                                                  */
+        /* ---------------------------------------------------------------- */
 
         if (
             ![
@@ -423,14 +426,14 @@ export async function POST(request) {
             );
         }
 
-        // ----------------------------------------------------
-        // NORMALIZE ITEM VALUES
-        // ----------------------------------------------------
+        /* ---------------------------------------------------------------- */
+        /* Normalize item values                                             */
+        /* ---------------------------------------------------------------- */
 
         const normalizedItems = [];
 
         for (let index = 0; index < items.length; index++) {
-            const item = items[index];
+            const item = items[index] || {};
 
             const productId = item.productId
                 ? positiveId(item.productId)
@@ -446,7 +449,6 @@ export async function POST(request) {
                     : null;
 
             const quantity = Number(item.quantityReceived);
-
             const unitCost = Number(item.unitCost ?? 0);
 
             const description = String(
@@ -470,6 +472,15 @@ export async function POST(request) {
             if (!validCost(unitCost)) {
                 return validationError(
                     `Item ${index + 1}: unit cost cannot be negative.`
+                );
+            }
+
+            if (
+                item.productId &&
+                !productId
+            ) {
+                return validationError(
+                    `Item ${index + 1}: invalid product reference.`
                 );
             }
 
@@ -503,9 +514,9 @@ export async function POST(request) {
             });
         }
 
-        // ----------------------------------------------------
-        // PREVENT DUPLICATE SOURCE ITEM REFERENCES
-        // ----------------------------------------------------
+        /* ---------------------------------------------------------------- */
+        /* Prevent duplicate source item references                         */
+        /* ---------------------------------------------------------------- */
 
         const referenceIds = normalizedItems
             .map((item) => {
@@ -527,9 +538,9 @@ export async function POST(request) {
             );
         }
 
-        // ----------------------------------------------------
-        // VALIDATE COMPANY (central database)
-        // ----------------------------------------------------
+        /* ---------------------------------------------------------------- */
+        /* Validate company in central database                             */
+        /* ---------------------------------------------------------------- */
 
         const companyResult = await pool.query(
             `
@@ -541,33 +552,29 @@ export async function POST(request) {
         );
 
         if (companyResult.rows.length === 0) {
-            throw new Error("Company not found.");
+            throwHttpError("Company not found.", 404);
         }
 
-        // Operational data lives in the company's own database.
+        /* ---------------------------------------------------------------- */
+        /* Connect to company operational database                          */
+        /* ---------------------------------------------------------------- */
+
         const db = await getTenantDb(user);
         client = await db.connect();
-
-        // ----------------------------------------------------
-        // START DATABASE TRANSACTION
-        // ----------------------------------------------------
 
         await client.query("BEGIN");
         transactionStarted = true;
 
-        // ----------------------------------------------------
-        // LOCK COMPANY FOR RECEIPT NUMBER GENERATION
-        // (advisory lock replaces the old companies row lock)
-        // ----------------------------------------------------
+        /* Serialize receipt number generation for this company. */
 
         await client.query(
             "SELECT pg_advisory_xact_lock($1::integer, $2::integer)",
             [companyId, 741207]
         );
 
-        // ----------------------------------------------------
-        // VALIDATE SUPPLIER
-        // ----------------------------------------------------
+        /* ---------------------------------------------------------------- */
+        /* Validate active supplier                                          */
+        /* ---------------------------------------------------------------- */
 
         const supplierResult = await client.query(
             `
@@ -577,19 +584,22 @@ export async function POST(request) {
             FROM suppliers
             WHERE supplier_id = $1
               AND COALESCE(is_active, TRUE) = TRUE
+              AND deleted_at IS NULL
+            FOR SHARE
             `,
             [supplierId]
         );
 
         if (supplierResult.rows.length === 0) {
-            throw new Error(
-                "Selected supplier does not exist or is inactive."
+            throwHttpError(
+                "Selected supplier does not exist, is inactive, or has been archived.",
+                404
             );
         }
 
-        // ----------------------------------------------------
-        // VALIDATE WAREHOUSE
-        // ----------------------------------------------------
+        /* ---------------------------------------------------------------- */
+        /* Validate active warehouse                                         */
+        /* ---------------------------------------------------------------- */
 
         const warehouseResult = await client.query(
             `
@@ -599,26 +609,26 @@ export async function POST(request) {
             FROM warehouses
             WHERE warehouse_id = $1
               AND COALESCE(is_active, TRUE) = TRUE
+              AND deleted_at IS NULL
+            FOR SHARE
             `,
             [warehouseId]
         );
 
         if (warehouseResult.rows.length === 0) {
-            throw new Error(
-                "Selected warehouse does not exist or is inactive."
+            throwHttpError(
+                "Selected warehouse does not exist, is inactive, or has been archived.",
+                404
             );
         }
 
-        // ----------------------------------------------------
-        // SOURCE DOCUMENT VALIDATION
-        // ----------------------------------------------------
+        /* ---------------------------------------------------------------- */
+        /* Validate source document                                          */
+        /* ---------------------------------------------------------------- */
 
         let finalPurchaseOrderId = purchaseOrderId;
-        let pendingHeader = null;
 
-        // ----------------------------------------------------
-        // DIRECT PURCHASE ORDER
-        // ----------------------------------------------------
+        /* Direct Purchase Order source. */
 
         if (sourceType === "PURCHASE_ORDER") {
             const poResult = await client.query(
@@ -630,13 +640,17 @@ export async function POST(request) {
                 FROM purchase_orders
                 WHERE purchase_order_id = $1
                   AND company_id = $2
+                  AND deleted_at IS NULL
                 FOR UPDATE
                 `,
                 [purchaseOrderId, companyId]
             );
 
             if (poResult.rows.length === 0) {
-                throw new Error("Purchase Order not found.");
+                throwHttpError(
+                    "Purchase Order not found or archived.",
+                    404
+                );
             }
 
             const po = poResult.rows[0];
@@ -644,21 +658,20 @@ export async function POST(request) {
             if (
                 String(po.status || "").toUpperCase() !== "APPROVED"
             ) {
-                throw new Error(
-                    "Only approved Purchase Orders can be received."
+                throwHttpError(
+                    "Only approved Purchase Orders can be received.",
+                    409
                 );
             }
 
             if (Number(po.supplier_id) !== supplierId) {
-                throw new Error(
+                throwHttpError(
                     "The selected supplier does not match the Purchase Order."
                 );
             }
         }
 
-        // ----------------------------------------------------
-        // PENDING ITEM RECEIPT
-        // ----------------------------------------------------
+        /* Pending Item Receipt source. */
 
         if (sourceType === "PENDING_ITEM_RECEIPT") {
             const pendingResult = await client.query(
@@ -671,31 +684,34 @@ export async function POST(request) {
                 FROM pending_item_receipts
                 WHERE pending_item_receipt_id = $1
                   AND company_id = $2
+                  AND deleted_at IS NULL
                 FOR UPDATE
                 `,
                 [pendingItemReceiptId, companyId]
             );
 
             if (pendingResult.rows.length === 0) {
-                throw new Error(
-                    "Pending Item Receipt not found."
+                throwHttpError(
+                    "Pending Item Receipt not found or archived.",
+                    404
                 );
             }
 
-            pendingHeader = pendingResult.rows[0];
+            const pendingHeader = pendingResult.rows[0];
 
             if (
                 ["CANCELLED", "CLOSED"].includes(
                     String(pendingHeader.status || "").toUpperCase()
                 )
             ) {
-                throw new Error(
-                    "This Pending Item Receipt cannot be converted."
+                throwHttpError(
+                    "This Pending Item Receipt cannot be converted.",
+                    409
                 );
             }
 
             if (Number(pendingHeader.supplier_id) !== supplierId) {
-                throw new Error(
+                throwHttpError(
                     "The selected supplier does not match the Pending Item Receipt."
                 );
             }
@@ -705,7 +721,15 @@ export async function POST(request) {
                     ? positiveId(pendingHeader.purchase_order_id)
                     : null;
 
-            // Validate linked Purchase Order.
+            if (pendingHeader.purchase_order_id && !finalPurchaseOrderId) {
+                throwHttpError(
+                    "The linked Purchase Order reference is invalid.",
+                    409
+                );
+            }
+
+            /* Validate linked Purchase Order, if present. */
+
             if (finalPurchaseOrderId) {
                 const poResult = await client.query(
                     `
@@ -716,14 +740,16 @@ export async function POST(request) {
                     FROM purchase_orders
                     WHERE purchase_order_id = $1
                       AND company_id = $2
+                      AND deleted_at IS NULL
                     FOR UPDATE
                     `,
                     [finalPurchaseOrderId, companyId]
                 );
 
                 if (poResult.rows.length === 0) {
-                    throw new Error(
-                        "The Purchase Order linked to this Pending Item Receipt was not found."
+                    throwHttpError(
+                        "The Purchase Order linked to this Pending Item Receipt was not found or has been archived.",
+                        404
                     );
                 }
 
@@ -732,28 +758,26 @@ export async function POST(request) {
                 if (
                     String(po.status || "").toUpperCase() !== "APPROVED"
                 ) {
-                    throw new Error(
-                        "The linked Purchase Order is no longer approved."
+                    throwHttpError(
+                        "The linked Purchase Order is no longer approved.",
+                        409
                     );
                 }
 
                 if (Number(po.supplier_id) !== supplierId) {
-                    throw new Error(
+                    throwHttpError(
                         "The supplier does not match the linked Purchase Order."
                     );
                 }
             }
         }
 
-        // ----------------------------------------------------
-        // VALIDATE SOURCE ITEMS AND OUTSTANDING QUANTITIES
-        // ----------------------------------------------------
+        /* ---------------------------------------------------------------- */
+        /* Validate products and source item quantities                     */
+        /* ---------------------------------------------------------------- */
 
         for (const item of normalizedItems) {
-
-            // ------------------------------------------------
-            // VALIDATE PRODUCT
-            // ------------------------------------------------
+            /* Validate product if supplied. */
 
             if (item.productId) {
                 const productResult = await client.query(
@@ -765,26 +789,24 @@ export async function POST(request) {
                         is_active
                     FROM products
                     WHERE product_id = $1
+                      AND COALESCE(is_active, TRUE) = TRUE
+                      AND deleted_at IS NULL
+                    FOR SHARE
                     `,
                     [item.productId]
                 );
 
                 if (productResult.rows.length === 0) {
-                    throw new Error(
-                        `Product not found: ${item.description}`
-                    );
-                }
-
-                if (productResult.rows[0].is_active === false) {
-                    throw new Error(
-                        `Product is inactive: ${item.description}`
+                    throwHttpError(
+                        `Product does not exist, is inactive, or has been archived: ${item.description}`,
+                        404
                     );
                 }
             }
 
-            // ------------------------------------------------
-            // PURCHASE ORDER ITEM VALIDATION
-            // ------------------------------------------------
+            /* ------------------------------------------------------------ */
+            /* Purchase Order item validation                               */
+            /* ------------------------------------------------------------ */
 
             if (sourceType === "PURCHASE_ORDER") {
                 const poItemResult = await client.query(
@@ -800,6 +822,7 @@ export async function POST(request) {
                     FROM purchase_order_items
                     WHERE purchase_order_item_id = $1
                       AND purchase_order_id = $2
+                    FOR SHARE
                     `,
                     [
                         item.purchaseOrderItemId,
@@ -808,8 +831,9 @@ export async function POST(request) {
                 );
 
                 if (poItemResult.rows.length === 0) {
-                    throw new Error(
-                        `Purchase Order item not found: ${item.description}`
+                    throwHttpError(
+                        `Purchase Order item not found: ${item.description}`,
+                        404
                     );
                 }
 
@@ -819,7 +843,7 @@ export async function POST(request) {
                     item.productId &&
                     Number(poItem.product_id) !== item.productId
                 ) {
-                    throw new Error(
+                    throwHttpError(
                         `Product does not match Purchase Order item: ${item.description}`
                     );
                 }
@@ -831,15 +855,13 @@ export async function POST(request) {
                             SUM(iri.quantity_received),
                             0
                         ) AS received_quantity
-
                     FROM item_receipt_items iri
-
                     INNER JOIN item_receipts ir
                         ON ir.item_receipt_id = iri.item_receipt_id
-
                     WHERE iri.purchase_order_item_id = $1
                       AND ir.company_id = $2
-                      AND UPPER(ir.status) = 'APPROVED'
+                      AND ir.deleted_at IS NULL
+                      AND UPPER(COALESCE(ir.status, '')) = 'APPROVED'
                     `,
                     [
                         item.purchaseOrderItemId,
@@ -856,16 +878,15 @@ export async function POST(request) {
                 const remainingQuantity =
                     orderedQuantity - alreadyReceived;
 
-                if (
-                    item.quantity >
-                    remainingQuantity + 1
-                ) {
-                    throw new Error(
-                        `${item.description}: only ${Math.max(0, remainingQuantity)} units remain to be received.`
+                if (item.quantity > remainingQuantity + 1) {
+                    throwHttpError(
+                        `${item.description}: only ${Math.max(0, remainingQuantity)} units remain to be received.`,
+                        409
                     );
                 }
 
-                // Use PO unit price when submitted cost is zero.
+                /* Use PO unit price when submitted cost is zero. */
+
                 if (
                     item.unitCost === 0 &&
                     Number(poItem.unit_price) > 0
@@ -874,9 +895,9 @@ export async function POST(request) {
                 }
             }
 
-            // ------------------------------------------------
-            // PENDING ITEM RECEIPT ITEM VALIDATION
-            // ------------------------------------------------
+            /* ------------------------------------------------------------ */
+            /* Pending Item Receipt item validation                         */
+            /* ------------------------------------------------------------ */
 
             if (sourceType === "PENDING_ITEM_RECEIPT") {
                 const pendingItemResult = await client.query(
@@ -889,11 +910,10 @@ export async function POST(request) {
                         item_description,
                         uom,
                         quantity_expected
-
                     FROM pending_item_receipt_items
-
                     WHERE pending_item_receipt_item_id = $1
                       AND pending_item_receipt_id = $2
+                    FOR SHARE
                     `,
                     [
                         item.pendingItemReceiptItemId,
@@ -902,8 +922,9 @@ export async function POST(request) {
                 );
 
                 if (pendingItemResult.rows.length === 0) {
-                    throw new Error(
-                        `Pending receipt item not found: ${item.description}`
+                    throwHttpError(
+                        `Pending receipt item not found: ${item.description}`,
+                        404
                     );
                 }
 
@@ -913,7 +934,7 @@ export async function POST(request) {
                     item.productId &&
                     Number(pendingItem.product_id) !== item.productId
                 ) {
-                    throw new Error(
+                    throwHttpError(
                         `Product does not match Pending Item Receipt: ${item.description}`
                     );
                 }
@@ -925,15 +946,13 @@ export async function POST(request) {
                             SUM(iri.quantity_received),
                             0
                         ) AS received_quantity
-
                     FROM item_receipt_items iri
-
                     INNER JOIN item_receipts ir
                         ON ir.item_receipt_id = iri.item_receipt_id
-
                     WHERE iri.pending_item_receipt_item_id = $1
                       AND ir.company_id = $2
-                      AND UPPER(ir.status) = 'APPROVED'
+                      AND ir.deleted_at IS NULL
+                      AND UPPER(COALESCE(ir.status, '')) = 'APPROVED'
                     `,
                     [
                         item.pendingItemReceiptItemId,
@@ -950,18 +969,14 @@ export async function POST(request) {
                 const remainingQuantity =
                     expectedQuantity - alreadyReceived;
 
-                if (
-                    item.quantity >
-                    remainingQuantity + 1
-                ) {
-                    throw new Error(
-                        `${item.description}: only ${Math.max(0, remainingQuantity)} units remain on the Pending Item Receipt.`
+                if (item.quantity > remainingQuantity + 1) {
+                    throwHttpError(
+                        `${item.description}: only ${Math.max(0, remainingQuantity)} units remain on the Pending Item Receipt.`,
+                        409
                     );
                 }
 
-                // --------------------------------------------
-                // VALIDATE LINKED PURCHASE ORDER ITEM
-                // --------------------------------------------
+                /* Validate linked Purchase Order item, if applicable. */
 
                 if (
                     pendingItem.purchase_order_item_id &&
@@ -969,10 +984,14 @@ export async function POST(request) {
                 ) {
                     const poItemResult = await client.query(
                         `
-                        SELECT quantity
+                        SELECT
+                            purchase_order_item_id,
+                            quantity,
+                            unit_price
                         FROM purchase_order_items
                         WHERE purchase_order_item_id = $1
                           AND purchase_order_id = $2
+                        FOR SHARE
                         `,
                         [
                             pendingItem.purchase_order_item_id,
@@ -981,8 +1000,9 @@ export async function POST(request) {
                     );
 
                     if (poItemResult.rows.length === 0) {
-                        throw new Error(
-                            `Linked Purchase Order item not found: ${item.description}`
+                        throwHttpError(
+                            `Linked Purchase Order item not found: ${item.description}`,
+                            404
                         );
                     }
 
@@ -993,15 +1013,13 @@ export async function POST(request) {
                                 SUM(iri.quantity_received),
                                 0
                             ) AS received_quantity
-
                         FROM item_receipt_items iri
-
                         INNER JOIN item_receipts ir
                             ON ir.item_receipt_id = iri.item_receipt_id
-
                         WHERE iri.purchase_order_item_id = $1
                           AND ir.company_id = $2
-                          AND UPPER(ir.status) = 'APPROVED'
+                          AND ir.deleted_at IS NULL
+                          AND UPPER(COALESCE(ir.status, '')) = 'APPROVED'
                         `,
                         [
                             pendingItem.purchase_order_item_id,
@@ -1016,18 +1034,25 @@ export async function POST(request) {
                         Number(poItemResult.rows[0].quantity) -
                         poAlreadyReceived;
 
+                    if (item.quantity > poRemaining + 1) {
+                        throwHttpError(
+                            `${item.description}: the Purchase Order has only ${Math.max(0, poRemaining)} units remaining.`,
+                            409
+                        );
+                    }
+
                     if (
-                        item.quantity >
-                        poRemaining + 1
+                        item.unitCost === 0 &&
+                        Number(poItemResult.rows[0].unit_price) > 0
                     ) {
-                        throw new Error(
-                            `${item.description}: the Purchase Order has only ${Math.max(0, poRemaining)} units remaining.`
+                        item.unitCost = Number(
+                            poItemResult.rows[0].unit_price
                         );
                     }
                 }
 
-                // Keep the actual source reference from the
-                // Pending Item Receipt.
+                /* Preserve the actual source PO item reference. */
+
                 item.purchaseOrderItemId =
                     pendingItem.purchase_order_item_id
                         ? positiveId(
@@ -1037,10 +1062,9 @@ export async function POST(request) {
             }
         }
 
-        // ----------------------------------------------------
-        // GENERATE RECEIPT NUMBER
-        // Example: IR-2026-000001
-        // ----------------------------------------------------
+        /* ---------------------------------------------------------------- */
+        /* Generate receipt number                                           */
+        /* ---------------------------------------------------------------- */
 
         const year = String(receiptDate).slice(0, 4);
 
@@ -1063,9 +1087,9 @@ export async function POST(request) {
         const receiptNumber =
             `IR-${year}-${String(nextNumber).padStart(6, "0")}`;
 
-        // ----------------------------------------------------
-        // CREATE ITEM RECEIPT HEADER
-        // ----------------------------------------------------
+        /* ---------------------------------------------------------------- */
+        /* Insert Item Receipt header                                        */
+        /* ---------------------------------------------------------------- */
 
         const headerResult = await client.query(
             `
@@ -1108,9 +1132,9 @@ export async function POST(request) {
 
         const receipt = headerResult.rows[0];
 
-        // ----------------------------------------------------
-        // CREATE ITEM RECEIPT ITEMS
-        // ----------------------------------------------------
+        /* ---------------------------------------------------------------- */
+        /* Insert Item Receipt lines                                         */
+        /* ---------------------------------------------------------------- */
 
         for (const item of normalizedItems) {
             const lineTotal =
@@ -1152,9 +1176,9 @@ export async function POST(request) {
             );
         }
 
-        // ----------------------------------------------------
-        // COMMIT
-        // ----------------------------------------------------
+        /* ---------------------------------------------------------------- */
+        /* Commit                                                            */
+        /* ---------------------------------------------------------------- */
 
         await client.query("COMMIT");
         transactionStarted = false;
@@ -1167,9 +1191,8 @@ export async function POST(request) {
             },
             { status: 201 }
         );
-
     } catch (error) {
-        if (transactionStarted) {
+        if (transactionStarted && client) {
             try {
                 await client.query("ROLLBACK");
             } catch (rollbackError) {
@@ -1181,7 +1204,6 @@ export async function POST(request) {
         }
 
         return apiError(error);
-
     } finally {
         client?.release();
     }

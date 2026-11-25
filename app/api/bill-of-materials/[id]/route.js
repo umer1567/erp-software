@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 import {
     BOM_PERMISSION,
     NO_STORE_HEADERS,
@@ -38,6 +39,7 @@ async function loadBom(client, bomId, companyId) {
             ON sp.sub_product_id = b.assembly_sub_product_id
         WHERE b.bom_id = $1
           AND b.company_id = $2
+          AND b.deleted_at IS NULL
         `,
         [bomId, companyId]
     );
@@ -125,21 +127,35 @@ async function loadBom(client, bomId, companyId) {
 async function validateItems(client, data) {
     if (data.assemblyProductId) {
         const result = await client.query(
-            `SELECT product_id FROM products WHERE product_id = $1`,
+            `
+            SELECT product_id
+            FROM products
+            WHERE product_id = $1
+              AND is_active = TRUE
+              AND deleted_at IS NULL
+            `,
             [data.assemblyProductId]
         );
 
         if (!result.rowCount) {
-            throw validationError("Selected assembly product was not found.");
+            throw validationError(
+                "Selected assembly product was not found or is inactive."
+            );
         }
     } else {
         const result = await client.query(
-            `SELECT sub_product_id FROM sub_products WHERE sub_product_id = $1`,
+            `
+            SELECT sub_product_id
+            FROM sub_products
+            WHERE sub_product_id = $1
+            `,
             [data.assemblySubProductId]
         );
 
         if (!result.rowCount) {
-            throw validationError("Selected assembly sub-product was not found.");
+            throw validationError(
+                "Selected assembly sub-product was not found."
+            );
         }
     }
 
@@ -147,16 +163,28 @@ async function validateItems(client, data) {
         for (const component of revision.components) {
             const result = component.productId
                 ? await client.query(
-                    `SELECT product_id FROM products WHERE product_id = $1`,
+                    `
+                    SELECT product_id
+                    FROM products
+                    WHERE product_id = $1
+                      AND is_active = TRUE
+                      AND deleted_at IS NULL
+                    `,
                     [component.productId]
                 )
                 : await client.query(
-                    `SELECT sub_product_id FROM sub_products WHERE sub_product_id = $1`,
+                    `
+                    SELECT sub_product_id
+                    FROM sub_products
+                    WHERE sub_product_id = $1
+                    `,
                     [component.subProductId]
                 );
 
             if (!result.rowCount) {
-                throw validationError("One of the selected BOM components was not found.");
+                throw validationError(
+                    "One of the selected BOM components was not found or is inactive."
+                );
             }
         }
     }
@@ -306,7 +334,6 @@ export async function GET(request, context) {
         const companyId = positiveId(user.companyId, "Company");
 
         const db = await getTenantDb(user);
-
         const result = await loadBom(db, bomId, companyId);
 
         return NextResponse.json(
@@ -338,7 +365,6 @@ export async function PUT(request, context) {
         }
 
         const data = prepareBomBody(body);
-
         const db = await getTenantDb(user);
 
         client = await db.connect();
@@ -350,6 +376,7 @@ export async function PUT(request, context) {
             FROM bill_of_materials
             WHERE bom_id = $1
               AND company_id = $2
+              AND deleted_at IS NULL
             FOR UPDATE
             `,
             [bomId, companyId]
@@ -372,7 +399,9 @@ export async function PUT(request, context) {
         );
 
         const existingRevisionIds = new Set(
-            existingRevisionsResult.rows.map((row) => Number(row.revision_id))
+            existingRevisionsResult.rows.map((row) =>
+                Number(row.revision_id)
+            )
         );
 
         const submittedRevisionIds = new Set();
@@ -387,7 +416,9 @@ export async function PUT(request, context) {
             }
 
             if (submittedRevisionIds.has(revision.revisionId)) {
-                throw validationError("A revision cannot be submitted more than once.");
+                throw validationError(
+                    "A revision cannot be submitted more than once."
+                );
             }
 
             submittedRevisionIds.add(revision.revisionId);
@@ -406,6 +437,7 @@ export async function PUT(request, context) {
                 updated_at = CURRENT_TIMESTAMP
             WHERE bom_id = $7
               AND company_id = $8
+              AND deleted_at IS NULL
             `,
             [
                 data.bomName,
@@ -526,25 +558,75 @@ export async function DELETE(request, context) {
 
         const db = await getTenantDb(user);
 
-        const result = await db.query(
-            `
-            DELETE FROM bill_of_materials
-            WHERE bom_id = $1
-              AND company_id = $2
-            RETURNING bom_id, bom_name
-            `,
-            [bomId, companyId]
+        const result = await archiveAndSoftDelete(
+            { user, db, companyId },
+            {
+                moduleKey: "bill_of_materials",
+                recordId: bomId,
+
+                validateRecord: async (client, record) => {
+                    if (record.deleted_at) {
+                        return {
+                            status: 404,
+                            message: "Bill of Materials not found.",
+                        };
+                    }
+
+                    // BOMs used by manufacturing transactions must not be archived.
+                    const buildsResult = await client.query(
+                        `
+                        SELECT COUNT(*)::INTEGER AS count
+                        FROM assembly_builds
+                        WHERE company_id = $1
+                          AND bom_id = $2
+                        `,
+                        [companyId, bomId]
+                    );
+
+                    if (Number(buildsResult.rows[0]?.count || 0) > 0) {
+                        return {
+                            status: 409,
+                            message:
+                                "This BOM is used by Assembly Builds and cannot be archived.",
+                        };
+                    }
+
+                    const unbuildsResult = await client.query(
+                        `
+                        SELECT COUNT(*)::INTEGER AS count
+                        FROM assembly_unbuilds
+                        WHERE company_id = $1
+                          AND bom_id = $2
+                        `,
+                        [companyId, bomId]
+                    );
+
+                    if (Number(unbuildsResult.rows[0]?.count || 0) > 0) {
+                        return {
+                            status: 409,
+                            message:
+                                "This BOM is used by Assembly Unbuilds and cannot be archived.",
+                        };
+                    }
+
+                    return null;
+                },
+            }
         );
 
-        if (!result.rowCount) {
-            throw validationError("Bill of Materials not found.", 404);
+        if (!result.success) {
+            throw validationError(
+                result.message || "Unable to archive Bill of Materials.",
+                result.status || 400
+            );
         }
 
         return NextResponse.json(
             {
                 success: true,
-                message: "Bill of Materials deleted successfully.",
-                deleted: result.rows[0],
+                message: "Bill of Materials moved to Recycle Bin.",
+                deleted: result.record,
+                archiveId: result.archiveId,
             },
             { headers: NO_STORE_HEADERS }
         );

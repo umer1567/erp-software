@@ -4,6 +4,7 @@ import pool, { getOperationalPool } from "@/lib/db";
 import { getCompanyProfile } from "@/lib/tenant";
 import { getCurrentUser } from "@/lib/auth";
 import { hasPermission } from "@/lib/permissions";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export const dynamic = "force-dynamic";
 
@@ -40,7 +41,10 @@ async function getContext() {
     };
 }
 
-function errorResponse(error) {
+function errorResponse(
+    error,
+    fallback = "Could not process the Delivery Challan."
+) {
     console.error("DELIVERY CHALLAN DETAIL API ERROR:", error);
 
     if (error.message === "UNAUTHORIZED") {
@@ -58,7 +62,7 @@ function errorResponse(error) {
     }
 
     return NextResponse.json(
-        { success: false, message: "Could not process the Delivery Challan." },
+        { success: false, message: fallback },
         { status: 500 }
     );
 }
@@ -100,11 +104,20 @@ export async function GET(request, { params }) {
                 w.location AS warehouse_location,
                 so.order_number AS source_order_number
             FROM delivery_challans dc
-            LEFT JOIN customers c ON c.customer_id = dc.customer_id
-            LEFT JOIN warehouses w ON w.warehouse_id = dc.warehouse_id
-            LEFT JOIN sales_orders so ON so.order_id = dc.source_order_id
+            LEFT JOIN customers c
+    ON c.customer_id = dc.customer_id
+   AND c.deleted_at IS NULL
+
+LEFT JOIN warehouses w
+    ON w.warehouse_id = dc.warehouse_id
+   AND w.deleted_at IS NULL
+
+LEFT JOIN sales_orders so
+    ON so.order_id = dc.source_order_id
+   AND so.deleted_at IS NULL
             WHERE dc.delivery_challan_id = $1
               AND dc.company_id = $2
+              AND dc.deleted_at IS NULL
             `,
             [id, context.companyId]
         );
@@ -268,15 +281,16 @@ export async function PUT(request, { params }) {
         await client.query("BEGIN");
 
         const existingResult = await client.query(
-            `
-            SELECT *
-            FROM delivery_challans
-            WHERE delivery_challan_id = $1
-              AND company_id = $2
-            FOR UPDATE
-            `,
-            [id, context.companyId]
-        );
+    `
+    SELECT *
+    FROM delivery_challans
+    WHERE delivery_challan_id = $1
+      AND company_id = $2
+      AND deleted_at IS NULL
+    FOR UPDATE
+    `,
+    [id, context.companyId]
+);
 
         if (!existingResult.rows.length) {
             await client.query("ROLLBACK");
@@ -312,14 +326,26 @@ export async function PUT(request, { params }) {
         }
 
         const customer = await client.query(
-            "SELECT customer_id FROM customers WHERE customer_id = $1 AND is_active = TRUE",
-            [customerId]
-        );
+    `
+    SELECT customer_id
+    FROM customers
+    WHERE customer_id = $1
+      AND is_active = TRUE
+      AND deleted_at IS NULL
+    `,
+    [customerId]
+);
 
-        const warehouse = await client.query(
-            "SELECT warehouse_id FROM warehouses WHERE warehouse_id = $1 AND is_active = TRUE",
-            [warehouseId]
-        );
+const warehouse = await client.query(
+    `
+    SELECT warehouse_id
+    FROM warehouses
+    WHERE warehouse_id = $1
+      AND is_active = TRUE
+      AND deleted_at IS NULL
+    `,
+    [warehouseId]
+);
 
         if (!customer.rows.length || !warehouse.rows.length) {
             await client.query("ROLLBACK");
@@ -354,7 +380,8 @@ export async function PUT(request, { params }) {
                 updated_by = $18,
                 updated_at = CURRENT_TIMESTAMP
             WHERE delivery_challan_id = $19
-              AND company_id = $20
+  AND company_id = $20
+  AND deleted_at IS NULL
             `,
             [
                 date,
@@ -449,6 +476,8 @@ export async function PUT(request, { params }) {
 }
 
 // DELETE /api/delivery-challans/:id
+// DELETE /api/delivery-challans/:id
+// Only manually created DRAFT challans can be archived.
 export async function DELETE(request, { params }) {
     try {
         const context = await getContext();
@@ -458,35 +487,48 @@ export async function DELETE(request, { params }) {
         }
 
         const db = await getOperationalPool(context.companyId);
-
         const id = await getId(params);
 
-        const result = await db.query(
-            `
-            DELETE FROM delivery_challans
-            WHERE delivery_challan_id = $1
-              AND company_id = $2
-              AND status = 'DRAFT'
-              AND source_order_id IS NULL
-            RETURNING delivery_challan_id
-            `,
-            [id, context.companyId]
+        const result = await archiveAndSoftDelete(
+            {
+                db,
+                companyId: context.companyId,
+                user: { userId: context.userId },
+            },
+            {
+                moduleKey: "delivery_challans",
+                recordId: id,
+                deletionReason: "Manually deleted draft Delivery Challan",
+                validateRecord: async (_client, record) => {
+                    if (String(record.status).toUpperCase() !== "DRAFT") {
+                        return {
+                            status: 409,
+                            message: "Only DRAFT Delivery Challans can be archived.",
+                        };
+                    }
+
+                    if (record.source_order_id !== null) {
+                        return {
+                            status: 409,
+                            message: "Sales Order-based Delivery Challans cannot be archived.",
+                        };
+                    }
+
+                    return null;
+                },
+            }
         );
 
-        if (!result.rows.length) {
+        if (!result.success) {
             return NextResponse.json(
-                {
-                    success: false,
-                    message:
-                        "Only draft, manually created challans can be deleted.",
-                },
-                { status: 409 }
+                { success: false, message: result.message },
+                { status: result.status }
             );
         }
 
         return NextResponse.json({
             success: true,
-            message: "Draft Delivery Challan deleted successfully.",
+            message: "Draft Delivery Challan moved to the Recycle Bin.",
         });
     } catch (error) {
         if (error.message === "INVALID_ID") {

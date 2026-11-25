@@ -22,9 +22,9 @@ const ALLOWED_STATUSES = [
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
 
-function validationError(message) {
+function validationError(message, statusCode = 400) {
   const error = new Error(message);
-  error.statusCode = 400;
+  error.statusCode = statusCode;
   return error;
 }
 
@@ -37,11 +37,9 @@ function errorResponse(error) {
       : error.message === "FORBIDDEN"
         ? 403
         : error.statusCode ||
-        (error.code === "23505"
-          ? 409
-          : error.code === "23503"
-            ? 400
-            : error.code === "23514"
+          (error.code === "23505"
+            ? 409
+            : error.code === "23503" || error.code === "23514"
               ? 400
               : 500);
 
@@ -175,8 +173,7 @@ function normalizeManualItems(items) {
       unitPrice,
       discountAmount,
       taxRate,
-      remarks:
-        String(item.remarks || "").trim() || null,
+      remarks: String(item.remarks || "").trim() || null,
     };
   });
 }
@@ -265,6 +262,7 @@ async function getNextQuotationNumber(client, companyId) {
     [companyId, 741206]
   );
 
+  // Include archived quotations so their numbers are never reused.
   const result = await client.query(
     `
     SELECT
@@ -294,7 +292,7 @@ async function getNextQuotationNumber(client, companyId) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* GET: Purchase quotation history and dropdown data                           */
+/* GET: Purchase quotation history and dropdown data                          */
 /* -------------------------------------------------------------------------- */
 
 export async function GET() {
@@ -318,7 +316,6 @@ export async function GET() {
       "company"
     );
 
-    // Operational data lives in the company's own database.
     const db = await getTenantDb(user);
 
     const [
@@ -328,7 +325,7 @@ export async function GET() {
       rfqOptionsResult,
       companyResult,
     ] = await Promise.all([
-      /* Purchase quotation history */
+      /* Active purchase quotation history */
       db.query(
         `
         SELECT
@@ -353,7 +350,9 @@ export async function GET() {
           ON i.purchase_quotation_id =
              pq.purchase_quotation_id
 
-        WHERE pq.company_id = $1
+        WHERE
+          pq.company_id = $1
+          AND pq.deleted_at IS NULL
 
         GROUP BY
           pq.purchase_quotation_id,
@@ -367,7 +366,7 @@ export async function GET() {
         [companyId]
       ),
 
-      /* Active suppliers */
+      /* Active, non-archived suppliers */
       db.query(
         `
         SELECT
@@ -380,13 +379,15 @@ export async function GET() {
 
         FROM suppliers
 
-        WHERE is_active = TRUE
+        WHERE
+          is_active = TRUE
+          AND deleted_at IS NULL
 
         ORDER BY supplier_name
         `
       ),
 
-      /* Active products */
+      /* Active, non-archived products */
       db.query(
         `
         SELECT
@@ -413,13 +414,15 @@ export async function GET() {
 
         FROM products
 
-        WHERE is_active = TRUE
+        WHERE
+          is_active = TRUE
+          AND deleted_at IS NULL
 
         ORDER BY product_name
         `
       ),
 
-      /* One row per RFQ supplier */
+      /* RFQ supplier options */
       db.query(
         `
         SELECT
@@ -463,7 +466,10 @@ export async function GET() {
         LEFT JOIN rfq_vendor_quotes q
           ON q.rfq_vendor_id = v.rfq_vendor_id
 
-        WHERE r.company_id = $1
+        WHERE
+          r.company_id = $1
+          AND s.is_active = TRUE
+          AND s.deleted_at IS NULL
 
         GROUP BY
           r.rfq_id,
@@ -490,7 +496,7 @@ export async function GET() {
         [companyId]
       ),
 
-      /* Company information */
+      /* Company information remains in the central database */
       pool.query(
         `
         SELECT *
@@ -594,6 +600,10 @@ export async function POST(request) {
       );
     }
 
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw validationError("Invalid request body.");
+    }
+
     const sourceType = String(
       body.sourceType || SOURCE_MANUAL
     ).trim().toUpperCase();
@@ -641,10 +651,7 @@ export async function POST(request) {
       );
     }
 
-    if (
-      validUntil &&
-      validUntil < quotationDate
-    ) {
+    if (validUntil && validUntil < quotationDate) {
       throw validationError(
         "The validity date cannot be earlier than the quotation date."
       );
@@ -661,13 +668,11 @@ export async function POST(request) {
     );
 
     const termsConditions =
-      String(body.termsConditions || "").trim() ||
-      null;
+      String(body.termsConditions || "").trim() || null;
 
     const remarks =
       String(body.remarks || "").trim() || null;
 
-    // Operational data lives in the company's own database.
     const db = await getTenantDb(user);
     client = await db.connect();
 
@@ -686,8 +691,10 @@ export async function POST(request) {
 
       FROM suppliers
 
-      WHERE supplier_id = $1
+      WHERE
+        supplier_id = $1
         AND is_active = TRUE
+        AND deleted_at IS NULL
 
       FOR SHARE
       `,
@@ -696,7 +703,7 @@ export async function POST(request) {
 
     if (!supplierResult.rowCount) {
       throw validationError(
-        "Selected supplier is inactive or unavailable."
+        "Selected supplier is inactive, archived, or unavailable."
       );
     }
 
@@ -740,20 +747,19 @@ export async function POST(request) {
 
         FROM products
 
-        WHERE product_id = ANY($1::INTEGER[])
+        WHERE
+          product_id = ANY($1::INTEGER[])
           AND is_active = TRUE
+          AND deleted_at IS NULL
 
         FOR UPDATE
         `,
         [productIds]
       );
 
-      if (
-        productResult.rows.length !==
-        productIds.length
-      ) {
+      if (productResult.rows.length !== productIds.length) {
         throw validationError(
-          "One or more selected products are inactive or unavailable."
+          "One or more selected products are inactive, archived, or unavailable."
         );
       }
 
@@ -775,8 +781,7 @@ export async function POST(request) {
           rfqItemId: null,
 
           itemDescription:
-            product.description ||
-            product.product_name,
+            product.description || product.product_name,
 
           uom: product.uom,
 
@@ -814,7 +819,8 @@ export async function POST(request) {
         INNER JOIN rfqs r
           ON r.rfq_id = v.rfq_id
 
-        WHERE v.rfq_vendor_id = $1
+        WHERE
+          v.rfq_vendor_id = $1
           AND v.supplier_id = $2
           AND r.rfq_id = $3
           AND r.company_id = $4
@@ -837,22 +843,22 @@ export async function POST(request) {
 
       /* Prevent duplicate import of the same supplier RFQ. */
 
-      const existingQuotationResult =
-        await client.query(
-          `
-          SELECT
-            purchase_quotation_id,
-            quotation_number
+      const existingQuotationResult = await client.query(
+        `
+        SELECT
+          purchase_quotation_id,
+          quotation_number
 
-          FROM purchase_quotations
+        FROM purchase_quotations
 
-          WHERE company_id = $1
-            AND rfq_vendor_id = $2
+        WHERE
+          company_id = $1
+          AND rfq_vendor_id = $2
 
-          LIMIT 1
-          `,
-          [companyId, rfqVendorId]
-        );
+        LIMIT 1
+        `,
+        [companyId, rfqVendorId]
+      );
 
       if (existingQuotationResult.rowCount) {
         throw validationError(
@@ -1108,10 +1114,6 @@ export async function POST(request) {
       );
     }
 
-    /* ---------------------------------------------------------------------- */
-    /* Commit transaction                                                      */
-    /* ---------------------------------------------------------------------- */
-
     await client.query("COMMIT");
     transactionStarted = false;
 
@@ -1134,7 +1136,7 @@ export async function POST(request) {
     );
   } catch (error) {
     if (transactionStarted && client) {
-      await client.query("ROLLBACK").catch(() => { });
+      await client.query("ROLLBACK").catch(() => {});
     }
 
     return errorResponse(error);

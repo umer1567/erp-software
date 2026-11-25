@@ -59,6 +59,7 @@ export async function GET() {
         created_at,
         updated_at
       FROM product_categories
+      WHERE deleted_at IS NULL
       ORDER BY category_name ASC
     `);
 

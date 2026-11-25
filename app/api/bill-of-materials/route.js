@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission, hasPermission } from "@/lib/permissions";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 import {
     BOM_PERMISSION,
     NO_STORE_HEADERS,
@@ -18,21 +19,35 @@ export const runtime = "nodejs";
 async function validateItems(client, data) {
     if (data.assemblyProductId) {
         const result = await client.query(
-            `SELECT product_id FROM products WHERE product_id = $1`,
+            `
+            SELECT product_id
+            FROM products
+            WHERE product_id = $1
+              AND is_active = TRUE
+              AND deleted_at IS NULL
+            `,
             [data.assemblyProductId]
         );
 
         if (!result.rowCount) {
-            throw validationError("Selected assembly product was not found.");
+            throw validationError(
+                "Selected assembly product was not found or is inactive."
+            );
         }
     } else {
         const result = await client.query(
-            `SELECT sub_product_id FROM sub_products WHERE sub_product_id = $1`,
+            `
+            SELECT sub_product_id
+            FROM sub_products
+            WHERE sub_product_id = $1
+            `,
             [data.assemblySubProductId]
         );
 
         if (!result.rowCount) {
-            throw validationError("Selected assembly sub-product was not found.");
+            throw validationError(
+                "Selected assembly sub-product was not found."
+            );
         }
     }
 
@@ -40,16 +55,28 @@ async function validateItems(client, data) {
         for (const component of revision.components) {
             const result = component.productId
                 ? await client.query(
-                    `SELECT product_id FROM products WHERE product_id = $1`,
+                    `
+                    SELECT product_id
+                    FROM products
+                    WHERE product_id = $1
+                      AND is_active = TRUE
+                      AND deleted_at IS NULL
+                    `,
                     [component.productId]
                 )
                 : await client.query(
-                    `SELECT sub_product_id FROM sub_products WHERE sub_product_id = $1`,
+                    `
+                    SELECT sub_product_id
+                    FROM sub_products
+                    WHERE sub_product_id = $1
+                    `,
                     [component.subProductId]
                 );
 
             if (!result.rowCount) {
-                throw validationError("One of the selected BOM components was not found.");
+                throw validationError(
+                    "One of the selected BOM components was not found or is inactive."
+                );
             }
         }
     }
@@ -105,26 +132,27 @@ async function insertRevision(client, bomId, revision) {
         const process = revision.process;
 
         const processResult = await client.query(
-    `
-    INSERT INTO bom_processes (
-        revision_id,
-        process_name,
-        location,
-        process_description,
-        process_memo,
-        created_at,
-        updated_at
-    )
-    VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-    `,
-    [
-        revisionId,
-        revision.processName,
-        revision.location,
-        revision.processDescription,
-        revision.processMemo,
-    ]
-);
+            `
+            INSERT INTO bom_processes (
+                revision_id,
+                process_name,
+                location,
+                process_description,
+                process_memo,
+                created_at,
+                updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+            RETURNING process_id
+            `,
+            [
+                revisionId,
+                process.processName,
+                process.location,
+                process.processDescription,
+                process.processMemo,
+            ]
+        );
 
         const processId = processResult.rows[0].process_id;
 
@@ -162,7 +190,6 @@ export async function GET() {
         }
 
         const companyId = positiveId(user.companyId, "Company");
-
         const db = await getTenantDb(user);
 
         const [result, canCreate, canUpdate, canDelete] = await Promise.all([
@@ -204,6 +231,7 @@ export async function GET() {
                     GROUP BY br.bom_id
                 ) cc ON cc.bom_id = b.bom_id
                 WHERE b.company_id = $1
+                  AND b.deleted_at IS NULL
                 ORDER BY b.bom_id DESC
                 `,
                 [companyId]
@@ -254,7 +282,6 @@ export async function POST(request) {
         }
 
         const data = prepareBomBody(body);
-
         const db = await getTenantDb(user);
 
         client = await db.connect();

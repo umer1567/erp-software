@@ -3,11 +3,11 @@ import { NextResponse } from "next/server";
 import { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export const dynamic = "force-dynamic";
 
 const PERMISSION = "assembly_unbuild";
-const EPSILON = 1e-9;
 const MAX_UNBUILD_QUANTITY = 1000000000;
 
 class ApiError extends Error {
@@ -19,20 +19,13 @@ class ApiError extends Error {
 }
 
 function jsonError(message, status = 500) {
-    return NextResponse.json(
-        { success: false, message },
-        { status }
-    );
+    return NextResponse.json({ success: false, message }, { status });
 }
 
 function getErrorStatus(error) {
     if (error?.message === "UNAUTHORIZED") return 401;
     if (error?.message === "FORBIDDEN") return 403;
-
-    if (error instanceof ApiError) {
-        return error.status;
-    }
-
+    if (error instanceof ApiError) return error.status;
     return 500;
 }
 
@@ -52,9 +45,11 @@ function isValidDate(value) {
 function isValidPositiveNumber(value) {
     const number = Number(value);
 
-    return Number.isFinite(number) &&
+    return (
+        Number.isFinite(number) &&
         number > 0 &&
-        number <= MAX_UNBUILD_QUANTITY;
+        number <= MAX_UNBUILD_QUANTITY
+    );
 }
 
 function calculateComponentQuantity(
@@ -101,41 +96,29 @@ async function getCurrentRecord(client, id, companyId, lock = false) {
         `
         SELECT
             au.*,
-
             w.warehouse_name,
-
             b.bom_name,
-
             br.revision_name,
-
             p.product_name AS assembly_product_name,
             p.sku AS assembly_product_sku,
-
             sp.sub_product_name AS assembly_sub_product_name,
             sp.sku AS assembly_sub_product_sku
-
         FROM assembly_unbuilds au
-
         LEFT JOIN warehouses w
             ON w.warehouse_id = au.warehouse_id
-
         LEFT JOIN bill_of_materials b
             ON b.bom_id = au.bom_id
            AND b.company_id = au.company_id
-
         LEFT JOIN bom_revisions br
             ON br.revision_id = au.revision_id
            AND br.bom_id = au.bom_id
-
         LEFT JOIN products p
             ON p.product_id = au.assembly_product_id
-
         LEFT JOIN sub_products sp
             ON sp.sub_product_id = au.assembly_sub_product_id
-
         WHERE au.assembly_unbuild_id = $1
           AND au.company_id = $2
-
+          AND au.deleted_at IS NULL
         ${lock ? "FOR UPDATE OF au" : ""}
         `,
         [id, companyId]
@@ -164,11 +147,8 @@ async function getComponents(client, id) {
             unit_cost,
             amount,
             details
-
         FROM assembly_unbuild_components
-
         WHERE assembly_unbuild_id = $1
-
         ORDER BY assembly_unbuild_component_id
         `,
         [id]
@@ -198,14 +178,9 @@ export async function GET(request, context) {
         }
 
         const id = await getId(context);
-
         const db = await getTenantDb(user);
 
-        const record = await getCurrentRecord(
-            db,
-            id,
-            companyId
-        );
+        const record = await getCurrentRecord(db, id, companyId);
 
         if (!record) {
             return jsonError(
@@ -234,7 +209,7 @@ export async function GET(request, context) {
 }
 
 // =========================================================
-// PATCH: UPDATE DRAFT
+// PATCH: UPDATE ACTIVE DRAFT ONLY
 // =========================================================
 
 export async function PATCH(request, context) {
@@ -259,7 +234,6 @@ export async function PATCH(request, context) {
 
         const id = await getId(context);
         const body = await request.json();
-
         const db = await getTenantDb(user);
 
         client = await db.connect();
@@ -336,13 +310,9 @@ export async function PATCH(request, context) {
                 bom_quantity,
                 quantity_type,
                 unit_cost
-
             FROM assembly_unbuild_components
-
             WHERE assembly_unbuild_id = $1
-
             ORDER BY assembly_unbuild_component_id
-
             FOR UPDATE
             `,
             [id]
@@ -354,12 +324,8 @@ export async function PATCH(request, context) {
             );
         }
 
-        // -------------------------------------------------
-        // RECOMPUTE USING SAVED BOM SNAPSHOTS
-        //
-        // Do not reload the current active BOM revision.
-        // The original selected revision must be preserved.
-        // -------------------------------------------------
+        // Recalculate using the saved BOM component snapshots.
+        // Do not reload a newer BOM revision.
 
         let componentAmount = 0;
 
@@ -379,18 +345,15 @@ export async function PATCH(request, context) {
             }
 
             const amount = returnedQuantity * unitCost;
-
             componentAmount += amount;
 
             await client.query(
                 `
                 UPDATE assembly_unbuild_components
-
                 SET
                     required_quantity = $1,
                     returned_quantity = $1,
                     amount = $2
-
                 WHERE assembly_unbuild_component_id = $3
                   AND assembly_unbuild_id = $4
                 `,
@@ -406,7 +369,6 @@ export async function PATCH(request, context) {
         const updatedResult = await client.query(
             `
             UPDATE assembly_unbuilds
-
             SET
                 transaction_date = $1,
                 unbuild_quantity = $2,
@@ -415,12 +377,11 @@ export async function PATCH(request, context) {
                 component_amount = $5,
                 updated_by = $6,
                 updated_at = CURRENT_TIMESTAMP
-
             WHERE assembly_unbuild_id = $7
               AND company_id = $8
+              AND deleted_at IS NULL
               AND UPPER(status) = 'DRAFT'
               AND posted_at IS NULL
-
             RETURNING *
             `,
             [
@@ -481,13 +442,11 @@ export async function PATCH(request, context) {
 }
 
 // =========================================================
-// DELETE: DELETE DRAFT ONLY
+// DELETE: ARCHIVE DRAFT ONLY
+// Preserve all component snapshots.
 // =========================================================
 
 export async function DELETE(request, context) {
-    let client;
-    let transactionStarted = false;
-
     try {
         const user = await getCurrentUser();
 
@@ -504,99 +463,44 @@ export async function DELETE(request, context) {
         }
 
         const id = await getId(context);
-
         const db = await getTenantDb(user);
 
-        client = await db.connect();
+        const result = await archiveAndSoftDelete(
+            { user, db, companyId },
+            {
+                moduleKey: "assembly_unbuild",
+                recordId: id,
+                deletionReason: "Assembly Unbuild archived by user.",
+                validateRecord: async (client, record) => {
+                    if (
+                        String(record.status).toUpperCase() !== "DRAFT" ||
+                        record.posted_at
+                    ) {
+                        return {
+                            status: 409,
+                            message:
+                                "Only unapproved, unposted Assembly Unbuild drafts can be archived.",
+                        };
+                    }
 
-        await client.query("BEGIN");
-        transactionStarted = true;
-
-        const record = await getCurrentRecord(
-            client,
-            id,
-            companyId,
-            true
+                    return null;
+                },
+            }
         );
-
-        if (!record) {
-            throw new ApiError(
-                "Assembly Unbuild transaction was not found.",
-                404
-            );
-        }
-
-        if (
-            String(record.status).toUpperCase() !== "DRAFT" ||
-            record.posted_at
-        ) {
-            throw new ApiError(
-                "Only unapproved Assembly Unbuild drafts can be deleted.",
-                409
-            );
-        }
-
-        // Explicit child deletion also works if the foreign key
-        // does not have ON DELETE CASCADE.
-
-        await client.query(
-            `
-            DELETE FROM assembly_unbuild_components
-            WHERE assembly_unbuild_id = $1
-            `,
-            [id]
-        );
-
-        const deleteResult = await client.query(
-            `
-            DELETE FROM assembly_unbuilds
-            WHERE assembly_unbuild_id = $1
-              AND company_id = $2
-              AND UPPER(status) = 'DRAFT'
-              AND posted_at IS NULL
-            RETURNING assembly_unbuild_id
-            `,
-            [id, companyId]
-        );
-
-        if (deleteResult.rows.length === 0) {
-            throw new ApiError(
-                "Assembly Unbuild draft could not be deleted.",
-                409
-            );
-        }
-
-        await client.query("COMMIT");
-        transactionStarted = false;
 
         return NextResponse.json({
             success: true,
-            message: "Assembly Unbuild draft deleted successfully.",
-            data: {
-                assembly_unbuild_id: id,
-            },
+            message:
+                result.message ||
+                "Assembly Unbuild draft archived successfully.",
+            archiveId: result.archiveId,
         });
     } catch (error) {
-        if (client && transactionStarted) {
-            try {
-                await client.query("ROLLBACK");
-            } catch (rollbackError) {
-                console.error(
-                    "ASSEMBLY UNBUILD DELETE ROLLBACK ERROR:",
-                    rollbackError
-                );
-            }
-        }
-
-        console.error("ASSEMBLY UNBUILD DELETE ERROR:", error);
+        console.error("ASSEMBLY UNBUILD ARCHIVE ERROR:", error);
 
         return jsonError(
-            error.message || "Unable to delete Assembly Unbuild draft.",
+            error.message || "Unable to archive Assembly Unbuild draft.",
             getErrorStatus(error)
         );
-    } finally {
-        if (client) {
-            client.release();
-        }
     }
 }

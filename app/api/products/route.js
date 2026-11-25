@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import pool, { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { hasPermission } from "@/lib/permissions";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -447,6 +448,7 @@ export async function GET() {
         ON ia.account_id = p.inventory_account_id
       LEFT JOIN chart_of_accounts ca
         ON ca.account_id = p.cogs_account_id
+        WHERE p.deleted_at IS NULL
       ORDER BY p.product_id DESC
     `;
 
@@ -737,6 +739,7 @@ export async function PUT(request) {
         minimum_stock = $26,
         is_active = $27
       WHERE product_id = $28
+  AND deleted_at IS NULL
       RETURNING *
       `,
       [...values, productId]
@@ -801,10 +804,21 @@ export async function DELETE(request) {
       return authorization.denied;
     }
 
-    const db = await getTenantDb(authorization.user);
+    const user = authorization.user;
+    const db = await getTenantDb(user);
+
+    const companyId = Number(
+      user.companyId ?? user.company_id
+    );
+
+    if (!Number.isSafeInteger(companyId) || companyId <= 0) {
+      return jsonError(
+        "A valid company could not be identified.",
+        403
+      );
+    }
 
     const { searchParams } = new URL(request.url);
-
     const productId = Number(searchParams.get("id"));
 
     if (!Number.isSafeInteger(productId) || productId < 1) {
@@ -814,24 +828,31 @@ export async function DELETE(request) {
       );
     }
 
-    const result = await db.query(
-      `
-      DELETE FROM products
-      WHERE product_id = $1
-      RETURNING product_id, sku, product_name
-      `,
-      [productId]
+    const result = await archiveAndSoftDelete(
+      {
+        user,
+        db,
+        companyId,
+      },
+      {
+        moduleKey: "products",
+        recordId: productId,
+      }
     );
 
-    if (result.rowCount === 0) {
-      return jsonError("Product not found.", 404);
+    if (!result.success) {
+      return jsonError(
+        result.message,
+        result.status
+      );
     }
 
     return NextResponse.json(
       {
         success: true,
-        message: "Product deleted successfully.",
-        product: result.rows[0],
+        message: "Product moved to Recycle Bin successfully.",
+        recycleBinId: result.archiveId,
+        product: result.record,
       },
       {
         status: 200,
@@ -841,13 +862,9 @@ export async function DELETE(request) {
   } catch (error) {
     console.error("PRODUCTS DELETE ERROR:", error);
 
-    if (error.code === "23503") {
-      return jsonError(
-        "This product is referenced by other ERP records and cannot be deleted. Deactivate it instead if appropriate.",
-        409
-      );
-    }
-
-    return jsonError("Failed to delete product.", 500);
+    return jsonError(
+      "Failed to move product to Recycle Bin.",
+      500
+    );
   }
 }

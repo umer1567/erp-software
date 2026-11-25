@@ -4,6 +4,9 @@ import bcrypt from "bcryptjs";
 import pool from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { hasPermission } from "@/lib/permissions";
+import {
+    archiveUserCompanyMembership,
+} from "@/lib/user-company-recycle-bin";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -45,6 +48,7 @@ async function getCurrentCompany(userId, companyId = null) {
         INNER JOIN roles r
             ON r.role_id = uc.role_id
         WHERE uc.user_id = $1
+          AND uc.deleted_at IS NULL
           AND u.is_active = TRUE
           AND c.is_active = TRUE
           ${companyCondition}
@@ -72,7 +76,15 @@ async function getParamsId(params) {
 }
 
 function jsonError(message, status) {
-    return NextResponse.json({ success: false, message }, { status });
+    return NextResponse.json(
+        { success: false, message },
+        {
+            status,
+            headers: {
+                "Cache-Control": "no-store",
+            },
+        }
+    );
 }
 
 function getRequestedCompanyId(request, body = null) {
@@ -87,12 +99,13 @@ function getRequestedCompanyId(request, body = null) {
 }
 
 async function resolveMembership(request, currentUser, companyId) {
-    // When companyId is supplied, only use that specific company.
-    // Otherwise, retain compatibility with older callers.
     return getCurrentCompany(currentUser.userId, companyId);
 }
 
+// =====================================================
 // PUT /api/users/:id
+// =====================================================
+
 export async function PUT(request, { params }) {
     let client;
     let transactionStarted = false;
@@ -119,16 +132,16 @@ export async function PUT(request, { params }) {
         }
 
         const requestedCompanyId = getRequestedCompanyId(request, body);
-
-        // Reject a supplied but invalid company ID.
         const urlCompanyId = new URL(request.url).searchParams.get("companyId");
 
         if (
             (urlCompanyId !== null && requestedCompanyId === null) ||
-            (body.companyId !== undefined &&
+            (
+                body.companyId !== undefined &&
                 body.companyId !== null &&
                 body.companyId !== "" &&
-                parseCompanyId(body.companyId) === null)
+                parseCompanyId(body.companyId) === null
+            )
         ) {
             return jsonError("Invalid company ID.", 400);
         }
@@ -234,12 +247,15 @@ export async function PUT(request, { params }) {
 
         const targetMembership = await pool.query(
             `
-            SELECT uc.user_id, uc.role_id
+            SELECT
+                uc.user_id,
+                uc.role_id
             FROM user_companies uc
             INNER JOIN companies c
                 ON c.company_id = uc.company_id
             WHERE uc.user_id = $1
               AND uc.company_id = $2
+              AND uc.deleted_at IS NULL
               AND c.is_active = TRUE
             LIMIT 1
             `,
@@ -247,7 +263,10 @@ export async function PUT(request, { params }) {
         );
 
         if (!targetMembership.rows.length) {
-            return jsonError("User not found in the selected company.", 404);
+            return jsonError(
+                "User does not have an active membership in the selected company.",
+                404
+            );
         }
 
         if (Number(currentUser.userId) === userId) {
@@ -314,13 +333,39 @@ export async function PUT(request, { params }) {
         );
 
         if (duplicate.rows.length) {
-            return jsonError("Username or email already exists.", 409);
+            return jsonError(
+                "Username or email already exists.",
+                409
+            );
         }
 
         client = await pool.connect();
 
         await client.query("BEGIN");
         transactionStarted = true;
+
+        // Lock and re-check the selected active membership.
+        const lockedMembership = await client.query(
+            `
+            SELECT user_id, company_id, role_id
+            FROM user_companies
+            WHERE user_id = $1
+              AND company_id = $2
+              AND deleted_at IS NULL
+            FOR UPDATE
+            `,
+            [userId, companyId]
+        );
+
+        if (!lockedMembership.rows.length) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+
+            return jsonError(
+                "This company membership is no longer active.",
+                409
+            );
+        }
 
         let result;
 
@@ -394,16 +439,23 @@ export async function PUT(request, { params }) {
             throw new Error("User account no longer exists.");
         }
 
-        // Change the role only for the selected company membership.
-        await client.query(
+        const membershipUpdate = await client.query(
             `
             UPDATE user_companies
             SET role_id = $1
             WHERE user_id = $2
               AND company_id = $3
+              AND deleted_at IS NULL
+            RETURNING user_id
             `,
             [roleId, userId, companyId]
         );
+
+        if (!membershipUpdate.rows.length) {
+            throw new Error(
+                "The selected company membership is no longer active."
+            );
+        }
 
         // Keep legacy fields aligned when this is the user's primary company.
         await client.query(
@@ -431,28 +483,46 @@ export async function PUT(request, { params }) {
     } catch (error) {
         if (client && transactionStarted) {
             await client.query("ROLLBACK").catch(() => {});
+            transactionStarted = false;
         }
 
         console.error("UPDATE USER ERROR:", error);
 
         if (error.code === "23505") {
-            return jsonError("Username or email already exists.", 409);
+            return jsonError(
+                "Username or email already exists.",
+                409
+            );
         }
 
-        return jsonError(
-            error.message === "User account no longer exists."
-                ? error.message
-                : "Failed to update user.",
-            error.message === "User account no longer exists." ? 404 : 500
-        );
+        if (
+            error.message === "User account no longer exists." ||
+            error.message ===
+                "The selected company membership is no longer active."
+        ) {
+            return jsonError(error.message, 409);
+        }
+
+        if (error.status) {
+            return jsonError(error.message, error.status);
+        }
+
+        return jsonError("Failed to update user.", 500);
     } finally {
         client?.release();
     }
 }
 
+// =====================================================
 // DELETE /api/users/:id?companyId=123
-// Removes access to the selected company, not the global login account.
+// Archives access to the selected company.
+// Does not delete the global login account.
+// =====================================================
+
 export async function DELETE(request, { params }) {
+    let client;
+    let transactionStarted = false;
+
     try {
         const currentUser = await getCurrentUser();
 
@@ -505,31 +575,56 @@ export async function DELETE(request, { params }) {
 
         const companyId = Number(membership.company_id);
 
-        const result = await pool.query(
-            `
-            DELETE FROM user_companies uc
-            USING companies c
-            WHERE uc.user_id = $1
-              AND uc.company_id = $2
-              AND c.company_id = uc.company_id
-              AND c.is_active = TRUE
-            RETURNING uc.user_id, uc.company_id
-            `,
-            [userId, companyId]
-        );
+        client = await pool.connect();
 
-        if (!result.rows.length) {
-            return jsonError("User not found in the selected company.", 404);
-        }
+        await client.query("BEGIN");
+        transactionStarted = true;
+
+        const archiveId = await archiveUserCompanyMembership(client, {
+    userId,
+    companyId,
+    deletedBy: Number(currentUser.userId),
+    deletionReason:
+        "Company access removed through User Management.",
+});
+
+        await client.query("COMMIT");
+        transactionStarted = false;
 
         return NextResponse.json({
             success: true,
-            message: "User access removed from this company successfully.",
-            user: result.rows[0],
+            message:
+                "User access archived successfully. It can be restored from the Recycle Bin.",
+            user: {
+                user_id: userId,
+                company_id: companyId,
+            },
+            recycleBinId: -Number(archiveId),
         });
     } catch (error) {
+        if (client && transactionStarted) {
+            await client.query("ROLLBACK").catch(() => {});
+            transactionStarted = false;
+        }
+
         console.error("DELETE USER ERROR:", error);
 
-        return jsonError("Failed to remove user access.", 500);
+        if (error.status) {
+            return jsonError(error.message, error.status);
+        }
+
+        if (error.code === "23503") {
+            return jsonError(
+                "This membership cannot be archived because it is referenced by another record.",
+                409
+            );
+        }
+
+        return jsonError(
+            error.message || "Failed to archive user access.",
+            500
+        );
+    } finally {
+        client?.release();
     }
 }

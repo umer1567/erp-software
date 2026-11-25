@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getTenantContext, unauthorizedResponse } from "@/lib/tenant";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export async function PUT(request, { params }) {
     try {
@@ -47,6 +48,8 @@ export async function PUT(request, { params }) {
                 is_active = $8,
                 updated_at = CURRENT_TIMESTAMP
             WHERE supplier_id = $9
+            AND deleted_at IS NULL
+            
             RETURNING *
             `,
             [
@@ -103,59 +106,38 @@ export async function PUT(request, { params }) {
 }
 
 
+
 export async function DELETE(request, { params }) {
-    try {
-        const tenant = await getTenantContext();
-        if (!tenant) return unauthorizedResponse();
-        const { db } = tenant;
+  try {
+    const tenant = await getTenantContext();
+    if (!tenant) return unauthorizedResponse();
 
-        const { id } = await params;
+    const { id } = await params;
 
-        const result = await db.query(
-            `
-            DELETE FROM suppliers
-            WHERE supplier_id = $1
-            RETURNING supplier_id
-            `,
-            [id]
-        );
+    const result = await archiveAndSoftDelete(tenant, {
+      moduleKey: "suppliers",
+      recordId: id,
+    });
 
-        if (result.rows.length === 0) {
-            return NextResponse.json(
-                {
-                    success: false,
-                    message: "Supplier not found.",
-                },
-                { status: 404 }
-            );
-        }
-
-        return NextResponse.json({
-            success: true,
-            message: "Supplier deleted successfully.",
-        });
-
-    } catch (error) {
-        console.error("SUPPLIER DELETE ERROR:", error);
-
-        if (error.code === "23503") {
-            return NextResponse.json(
-                {
-                    success: false,
-                    message:
-                        "Supplier cannot be deleted because purchase records exist.",
-                },
-                { status: 409 }
-            );
-        }
-
-        return NextResponse.json(
-            {
-                success: false,
-                message: "Failed to delete supplier.",
-                error: error.message,
-            },
-            { status: 500 }
-        );
+    if (!result.success) {
+      return NextResponse.json(
+        { success: false, message: result.message },
+        { status: result.status }
+      );
     }
+
+    return NextResponse.json({
+      success: true,
+      message: "Supplier moved to Recycle Bin successfully.",
+      recycleBinId: result.archiveId,
+      supplier: result.record,
+    });
+  } catch (error) {
+    console.error("SUPPLIER DELETE ERROR:", error);
+
+    return NextResponse.json(
+      { success: false, message: "Failed to archive supplier." },
+      { status: 500 }
+    );
+  }
 }

@@ -1,8 +1,10 @@
+
 import { NextResponse } from "next/server";
 import pool, { getOperationalPool } from "@/lib/db";
 import { getCompanyProfile } from "@/lib/tenant";
 import { getCurrentUser } from "@/lib/auth";
 import { hasPermission } from "@/lib/permissions";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export const dynamic = "force-dynamic";
 
@@ -75,6 +77,7 @@ function calculateItems(items) {
         const retailPrice = Number(item.retail_price ?? item.unit_price);
         const discount = Number(item.discount_percent || 0);
         const taxRate = Number(item.tax_rate || 0);
+
         const productId =
             item.product_id === "" || item.product_id == null
                 ? null
@@ -89,15 +92,25 @@ function calculateItems(items) {
             !Number.isFinite(retailPrice) || retailPrice < 0 ||
             !Number.isFinite(discount) || discount < 0 || discount > 100 ||
             !Number.isFinite(taxRate) || taxRate < 0 ||
-            (productId !== null && (!Number.isSafeInteger(productId) || productId <= 0))
+            (
+                productId !== null &&
+                (!Number.isSafeInteger(productId) || productId <= 0)
+            )
         ) {
             throw new Error(`Invalid values on line ${index + 1}.`);
         }
 
-        const unitPrice = Math.round(retailPrice * (1 - discount / 100) * 100) / 100;
-        const amount = Math.round(quantity * unitPrice * 100) / 100;
-        const taxAmount = Math.round(amount * taxRate) / 100;
-        const grossAmount = Math.round((amount + taxAmount) * 100) / 100;
+        const unitPrice =
+            Math.round(retailPrice * (1 - discount / 100) * 100) / 100;
+
+        const amount =
+            Math.round(quantity * unitPrice * 100) / 100;
+
+        const taxAmount =
+            Math.round(amount * taxRate) / 100;
+
+        const grossAmount =
+            Math.round((amount + taxAmount) * 100) / 100;
 
         subtotal += amount;
         taxTotal += taxAmount;
@@ -130,31 +143,46 @@ function calculateItems(items) {
     };
 }
 
+/* ---------------------------------------------------------
+   LOAD SALES ORDER ITEMS
+
+   The parent order must belong to the current company and
+   must not be archived in the Recycle Bin.
+--------------------------------------------------------- */
+
+async function loadItems(db, orderId, companyId) {
+    const result = await db.query(
+        `
+        SELECT soi.*
+        FROM sales_order_items soi
+        INNER JOIN sales_orders so
+            ON so.order_id = soi.order_id
+        WHERE soi.order_id = $1
+          AND so.company_id = $2
+          AND so.deleted_at IS NULL
+        ORDER BY
+            soi.line_number ASC,
+            soi.order_item_id ASC
+        `,
+        [orderId, companyId]
+    );
+
+    return result.rows;
+}
+
 async function findOrder(db, orderId, companyId) {
     const result = await db.query(
         `
         SELECT *
         FROM sales_orders
-        WHERE order_id = $1 AND company_id = $2
+        WHERE order_id = $1
+          AND company_id = $2
+          AND deleted_at IS NULL
         `,
         [orderId, companyId]
     );
 
     return result.rows[0] || null;
-}
-
-async function loadItems(db, orderId) {
-    const result = await db.query(
-        `
-        SELECT *
-        FROM sales_order_items
-        WHERE order_id = $1
-        ORDER BY line_number, order_item_id
-        `,
-        [orderId]
-    );
-
-    return result.rows;
 }
 
 // GET /api/sales-orders/:id
@@ -191,11 +219,18 @@ export async function GET(request, { params }) {
                 w.warehouse_name,
                 q.quotation_number AS source_quotation_number
             FROM sales_orders so
-            LEFT JOIN customers c ON c.customer_id = so.customer_id
-            LEFT JOIN warehouses w ON w.warehouse_id = so.warehouse_id
-            LEFT JOIN sales_quotations q ON q.quotation_id = so.source_quotation_id
+            LEFT JOIN customers c
+                ON c.customer_id = so.customer_id
+               AND c.deleted_at IS NULL
+            LEFT JOIN warehouses w
+                ON w.warehouse_id = so.warehouse_id
+               AND w.deleted_at IS NULL
+            LEFT JOIN sales_quotations q
+                ON q.quotation_id = so.source_quotation_id
+               AND q.deleted_at IS NULL
             WHERE so.order_id = $1
               AND so.company_id = $2
+              AND so.deleted_at IS NULL
             `,
             [orderId, context.companyId]
         );
@@ -209,13 +244,20 @@ export async function GET(request, { params }) {
 
         const company = await getCompanyProfile(context.companyId);
         const orderRow = order.rows[0];
+
         orderRow.company_name = company?.company_name ?? null;
         orderRow.company_currency = company?.currency ?? null;
+
+        const items = await loadItems(
+            db,
+            orderId,
+            context.companyId
+        );
 
         return NextResponse.json({
             success: true,
             order: orderRow,
-            items: await loadItems(db, orderId),
+            items,
         });
     } catch (error) {
         return errorResponse(error, "Could not load the Sales Order.");
@@ -285,7 +327,10 @@ export async function PUT(request, { params }) {
 
         if (!Number.isFinite(exchangeRate) || exchangeRate <= 0) {
             return NextResponse.json(
-                { success: false, message: "Exchange rate must be greater than zero." },
+                {
+                    success: false,
+                    message: "Exchange rate must be greater than zero.",
+                },
                 { status: 400 }
             );
         }
@@ -296,7 +341,9 @@ export async function PUT(request, { params }) {
             `
             SELECT order_id, source_quotation_id, document_status
             FROM sales_orders
-            WHERE order_id = $1 AND company_id = $2
+            WHERE order_id = $1
+              AND company_id = $2
+              AND deleted_at IS NULL
             FOR UPDATE
             `,
             [orderId, context.companyId]
@@ -304,6 +351,7 @@ export async function PUT(request, { params }) {
 
         if (!existing.rows.length) {
             await client.query("ROLLBACK");
+
             return NextResponse.json(
                 { success: false, message: "Sales Order not found." },
                 { status: 404 }
@@ -311,29 +359,50 @@ export async function PUT(request, { params }) {
         }
 
         if (
-            String(existing.rows[0].document_status || "").toLowerCase() === "fully invoiced"
+            String(existing.rows[0].document_status || "").toLowerCase() ===
+            "fully invoiced"
         ) {
             await client.query("ROLLBACK");
+
             return NextResponse.json(
-                { success: false, message: "A fully invoiced order cannot be edited." },
+                {
+                    success: false,
+                    message: "A fully invoiced order cannot be edited.",
+                },
                 { status: 409 }
             );
         }
 
         const customer = await client.query(
-            `SELECT credit_limit FROM customers WHERE customer_id = $1 AND is_active = TRUE`,
+            `
+            SELECT credit_limit
+            FROM customers
+            WHERE customer_id = $1
+              AND is_active = TRUE
+              AND deleted_at IS NULL
+            `,
             [customerId]
         );
 
         const warehouse = await client.query(
-            `SELECT warehouse_id FROM warehouses WHERE warehouse_id = $1 AND is_active = TRUE`,
+            `
+            SELECT warehouse_id
+            FROM warehouses
+            WHERE warehouse_id = $1
+              AND is_active = TRUE
+              AND deleted_at IS NULL
+            `,
             [warehouseId]
         );
 
         if (!customer.rows.length || !warehouse.rows.length) {
             await client.query("ROLLBACK");
+
             return NextResponse.json(
-                { success: false, message: "Select a valid active customer and location." },
+                {
+                    success: false,
+                    message: "Select a valid active customer and location.",
+                },
                 { status: 400 }
             );
         }
@@ -341,12 +410,20 @@ export async function PUT(request, { params }) {
         for (const item of calculated.items) {
             if (item.product_id !== null) {
                 const product = await client.query(
-                    `SELECT product_id FROM products WHERE product_id = $1 AND is_active = TRUE`,
+                    `
+                    SELECT product_id
+                    FROM products
+                    WHERE product_id = $1
+                      AND is_active = TRUE
+                      AND deleted_at IS NULL
+                    `,
                     [item.product_id]
                 );
 
                 if (!product.rows.length) {
-                    throw new Error(`Product "${item.item_name}" is unavailable.`);
+                    throw new Error(
+                        `Product "${item.item_name}" is unavailable.`
+                    );
                 }
             }
         }
@@ -374,7 +451,9 @@ export async function PUT(request, { params }) {
                 customer_credit_limit = $17,
                 updated_by = $18,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE order_id = $19 AND company_id = $20
+            WHERE order_id = $19
+              AND company_id = $20
+              AND deleted_at IS NULL
             `,
             [
                 customerId,
@@ -400,8 +479,13 @@ export async function PUT(request, { params }) {
             ]
         );
 
+        // Replace transaction lines as part of the normal edit operation.
+        // This does not archive or permanently delete the Sales Order.
         await client.query(
-            `DELETE FROM sales_order_items WHERE order_id = $1`,
+            `
+            DELETE FROM sales_order_items
+            WHERE order_id = $1
+            `,
             [orderId]
         );
 
@@ -409,10 +493,23 @@ export async function PUT(request, { params }) {
             await client.query(
                 `
                 INSERT INTO sales_order_items (
-                    order_id, product_id, item_name, item_description,
-                    item_balance, uom, quantity, retail_price,
-                    discount_percent, unit_price, amount, tax_code,
-                    tax_rate, tax_amount, gross_amount, memo, line_number
+                    order_id,
+                    product_id,
+                    item_name,
+                    item_description,
+                    item_balance,
+                    uom,
+                    quantity,
+                    retail_price,
+                    discount_percent,
+                    unit_price,
+                    amount,
+                    tax_code,
+                    tax_rate,
+                    tax_amount,
+                    gross_amount,
+                    memo,
+                    line_number
                 )
                 VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9,
@@ -449,7 +546,7 @@ export async function PUT(request, { params }) {
         });
     } catch (error) {
         try {
-            await client.query("ROLLBACK");
+            await client?.query("ROLLBACK");
         } catch {}
 
         if (
@@ -471,6 +568,7 @@ export async function PUT(request, { params }) {
 }
 
 // DELETE /api/sales-orders/:id
+// Only Pending Delivery Challan orders with no dependent challans can be archived.
 export async function DELETE(request, { params }) {
     try {
         const context = await getContext();
@@ -491,32 +589,64 @@ export async function DELETE(request, { params }) {
             );
         }
 
-        const result = await db.query(
-            `
-            DELETE FROM sales_orders
-            WHERE order_id = $1
-              AND company_id = $2
-              AND COALESCE(LOWER(document_status), '') = 'pending delivery challan'
-            RETURNING order_id
-            `,
-            [orderId, context.companyId]
+        const result = await archiveAndSoftDelete(
+            {
+                db,
+                companyId: context.companyId,
+                user: { userId: context.userId },
+            },
+            {
+                moduleKey: "sales_orders",
+                recordId: orderId,
+                deletionReason: "Sales Order archived",
+                validateRecord: async (client, record) => {
+                    if (
+                        String(record.document_status || "").trim().toLowerCase() !==
+                        "pending delivery challan"
+                    ) {
+                        return {
+                            status: 409,
+                            message:
+                                "Only Sales Orders with Pending Delivery Challan status can be archived.",
+                        };
+                    }
+
+                    const challans = await client.query(
+                        `
+                        SELECT delivery_challan_id
+                        FROM delivery_challans
+                        WHERE company_id = $1
+                          AND source_order_id = $2
+                        LIMIT 1
+                        `,
+                        [context.companyId, orderId]
+                    );
+
+                    if (challans.rowCount > 0) {
+                        return {
+                            status: 409,
+                            message:
+                                "This Sales Order has a linked Delivery Challan and cannot be archived.",
+                        };
+                    }
+
+                    return null;
+                },
+            }
         );
 
-        if (!result.rows.length) {
+        if (!result.success) {
             return NextResponse.json(
-                {
-                    success: false,
-                    message: "Order not found or cannot be deleted because its document status has progressed.",
-                },
-                { status: 409 }
+                { success: false, message: result.message },
+                { status: result.status }
             );
         }
 
         return NextResponse.json({
             success: true,
-            message: "Sales Order deleted successfully.",
+            message: "Sales Order moved to the Recycle Bin.",
         });
     } catch (error) {
-        return errorResponse(error, "Could not delete the Sales Order.");
+        return errorResponse(error, "Could not archive the Sales Order.");
     }
 }

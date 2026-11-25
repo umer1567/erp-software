@@ -3,19 +3,17 @@ import { NextResponse } from "next/server";
 import { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export const dynamic = "force-dynamic";
 
-// ============================================================
-// HELPERS
-// ============================================================
+/* -------------------------------------------------------------------------- */
+/* Helpers                                                                    */
+/* -------------------------------------------------------------------------- */
 
 function positiveId(value) {
     const number = Number(value);
-
-    return Number.isInteger(number) && number > 0
-        ? number
-        : null;
+    return Number.isInteger(number) && number > 0 ? number : null;
 }
 
 function validDate(value) {
@@ -24,41 +22,49 @@ function validDate(value) {
 
 function validQuantity(value) {
     const number = Number(value);
-
     return Number.isFinite(number) && number > 0;
 }
 
 function validCost(value) {
     const number = Number(value);
-
     return Number.isFinite(number) && number >= 0;
+}
+
+function validationError(message, status = 400) {
+    return NextResponse.json({ message }, { status });
 }
 
 function apiError(error) {
     console.error("ITEM RECEIPT DETAIL API ERROR:", error);
 
     if (error.message === "UNAUTHORIZED") {
-        return NextResponse.json(
-            { message: "You are not authorized. Please log in." },
-            { status: 401 }
+        return validationError(
+            "You are not authorized. Please log in.",
+            401
         );
     }
 
     if (error.message === "FORBIDDEN") {
-        return NextResponse.json(
-            { message: "You do not have permission to perform this action." },
-            { status: 403 }
+        return validationError(
+            "You do not have permission to perform this action.",
+            403
         );
     }
 
-    return NextResponse.json(
-        { message: error.message || "Internal server error." },
-        { status: 500 }
+    if (error.status) {
+        return validationError(error.message, error.status);
+    }
+
+    return validationError(
+        error.message || "Internal server error.",
+        500
     );
 }
 
-function validationError(message, status = 400) {
-    return NextResponse.json({ message }, { status });
+function throwHttpError(message, status = 400) {
+    const error = new Error(message);
+    error.status = status;
+    throw error;
 }
 
 async function getReceiptId(context) {
@@ -66,9 +72,17 @@ async function getReceiptId(context) {
     return positiveId(params?.id);
 }
 
-// ============================================================
-// GET: SINGLE ITEM RECEIPT
-// ============================================================
+function getCompanyId(user) {
+    return positiveId(user?.companyId || user?.company_id);
+}
+
+function getUserId(user) {
+    return positiveId(user?.userId || user?.user_id);
+}
+
+/* -------------------------------------------------------------------------- */
+/* GET: SINGLE ITEM RECEIPT                                                   */
+/* -------------------------------------------------------------------------- */
 
 export async function GET(request, context) {
     try {
@@ -78,16 +92,10 @@ export async function GET(request, context) {
             return validationError("Unauthorized.", 401);
         }
 
-        await requirePermission(
-            user,
-            "item_receipts",
-            "view"
-        );
+        await requirePermission(user, "item_receipts", "view");
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
-
-        const companyId = positiveId(user.companyId);
+        const companyId = getCompanyId(user);
         const receiptId = await getReceiptId(context);
 
         if (!companyId) {
@@ -102,19 +110,15 @@ export async function GET(request, context) {
             `
             SELECT
                 ir.*,
-
                 s.supplier_name,
                 s.supplier_code,
                 s.phone AS supplier_phone,
                 s.email AS supplier_email,
                 s.address AS supplier_address,
-
                 w.warehouse_name,
                 w.warehouse_code,
                 w.location AS warehouse_location,
-
                 po.purchase_order_number,
-
                 pir.receipt_number AS pending_receipt_number
 
             FROM item_receipts ir
@@ -126,8 +130,7 @@ export async function GET(request, context) {
                 ON w.warehouse_id = ir.warehouse_id
 
             LEFT JOIN purchase_orders po
-                ON po.purchase_order_id =
-                    ir.purchase_order_id
+                ON po.purchase_order_id = ir.purchase_order_id
 
             LEFT JOIN pending_item_receipts pir
                 ON pir.pending_item_receipt_id =
@@ -135,6 +138,7 @@ export async function GET(request, context) {
 
             WHERE ir.item_receipt_id = $1
               AND ir.company_id = $2
+              AND ir.deleted_at IS NULL
             `,
             [receiptId, companyId]
         );
@@ -147,7 +151,6 @@ export async function GET(request, context) {
             `
             SELECT
                 iri.*,
-
                 p.product_name,
                 p.sku,
                 p.unit AS product_unit
@@ -164,8 +167,6 @@ export async function GET(request, context) {
             [receiptId]
         );
 
-        const receipt = receiptResult.rows[0];
-
         const totalQuantity = itemsResult.rows.reduce(
             (total, item) =>
                 total + Number(item.quantity_received || 0),
@@ -180,7 +181,7 @@ export async function GET(request, context) {
 
         return NextResponse.json({
             success: true,
-            receipt,
+            receipt: receiptResult.rows[0],
             items: itemsResult.rows,
             summary: {
                 itemCount: itemsResult.rows.length,
@@ -188,19 +189,17 @@ export async function GET(request, context) {
                 totalAmount,
             },
         });
-
     } catch (error) {
         return apiError(error);
     }
 }
 
-// ============================================================
-// PATCH: UPDATE DRAFT ITEM RECEIPT
-// ============================================================
+/* -------------------------------------------------------------------------- */
+/* PATCH: UPDATE DRAFT ITEM RECEIPT                                           */
+/* -------------------------------------------------------------------------- */
 
 export async function PATCH(request, context) {
     let client;
-
     let transactionStarted = false;
 
     try {
@@ -210,14 +209,10 @@ export async function PATCH(request, context) {
             return validationError("Unauthorized.", 401);
         }
 
-        await requirePermission(
-            user,
-            "item_receipts",
-            "update"
-        );
+        await requirePermission(user, "item_receipts", "update");
 
-        const companyId = positiveId(user.companyId);
-        const userId = positiveId(user.userId);
+        const companyId = getCompanyId(user);
+        const userId = getUserId(user);
         const receiptId = await getReceiptId(context);
 
         if (!companyId || !userId || !receiptId) {
@@ -227,17 +222,14 @@ export async function PATCH(request, context) {
         }
 
         const body = await request.json();
-
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
+
         client = await db.connect();
 
         await client.query("BEGIN");
         transactionStarted = true;
 
-        // ----------------------------------------------------
-        // LOCK RECEIPT
-        // ----------------------------------------------------
+        /* Lock active receipt belonging to this company. */
 
         const receiptResult = await client.query(
             `
@@ -245,53 +237,44 @@ export async function PATCH(request, context) {
             FROM item_receipts
             WHERE item_receipt_id = $1
               AND company_id = $2
+              AND deleted_at IS NULL
             FOR UPDATE
             `,
             [receiptId, companyId]
         );
 
         if (receiptResult.rows.length === 0) {
-            await client.query("ROLLBACK");
-            transactionStarted = false;
-
-            return validationError("Item Receipt not found.", 404);
+            throwHttpError("Item Receipt not found.", 404);
         }
 
         const receipt = receiptResult.rows[0];
 
-        if (String(receipt.status).toUpperCase() !== "DRAFT") {
-            await client.query("ROLLBACK");
-            transactionStarted = false;
-
-            return validationError(
+        if (String(receipt.status || "").toUpperCase() !== "DRAFT") {
+            throwHttpError(
                 "Only draft Item Receipts can be edited.",
                 409
             );
         }
 
-        // ----------------------------------------------------
-        // KEEP SOURCE DOCUMENT FIXED
-        // ----------------------------------------------------
+        /* Keep the source document fixed. */
 
         const sourceType = String(
             receipt.source_type || "MANUAL"
         ).toUpperCase();
 
-        const purchaseOrderId =
-            receipt.purchase_order_id
-                ? positiveId(receipt.purchase_order_id)
-                : null;
+        const purchaseOrderId = receipt.purchase_order_id
+            ? positiveId(receipt.purchase_order_id)
+            : null;
 
-        const pendingItemReceiptId =
-            receipt.pending_item_receipt_id
-                ? positiveId(receipt.pending_item_receipt_id)
-                : null;
+        const pendingItemReceiptId = receipt.pending_item_receipt_id
+            ? positiveId(receipt.pending_item_receipt_id)
+            : null;
 
         if (
             body.sourceType &&
             String(body.sourceType).toUpperCase() !== sourceType
         ) {
-            throw new Error(
+            throwHttpError(
                 "The source type cannot be changed after creating an Item Receipt."
             );
         }
@@ -300,7 +283,7 @@ export async function PATCH(request, context) {
             body.purchaseOrderId &&
             positiveId(body.purchaseOrderId) !== purchaseOrderId
         ) {
-            throw new Error(
+            throwHttpError(
                 "The linked Purchase Order cannot be changed."
             );
         }
@@ -309,14 +292,12 @@ export async function PATCH(request, context) {
             body.pendingItemReceiptId &&
             positiveId(body.pendingItemReceiptId) !== pendingItemReceiptId
         ) {
-            throw new Error(
+            throwHttpError(
                 "The linked Pending Item Receipt cannot be changed."
             );
         }
 
-        // ----------------------------------------------------
-        // HEADER VALUES
-        // ----------------------------------------------------
+        /* Header values. */
 
         const supplierId =
             body.supplierId !== undefined
@@ -339,20 +320,18 @@ export async function PATCH(request, context) {
                 : receipt.remarks || "";
 
         if (!supplierId) {
-            throw new Error("Please select a valid supplier.");
+            throwHttpError("Please select a valid supplier.");
         }
 
         if (!warehouseId) {
-            throw new Error("Please select a valid warehouse.");
+            throwHttpError("Please select a valid warehouse.");
         }
 
         if (!validDate(receiptDate)) {
-            throw new Error("Please provide a valid receipt date.");
+            throwHttpError("Please provide a valid receipt date.");
         }
 
-        // ----------------------------------------------------
-        // VALIDATE SUPPLIER
-        // ----------------------------------------------------
+        /* Validate active supplier. */
 
         const supplierResult = await client.query(
             `
@@ -360,19 +339,19 @@ export async function PATCH(request, context) {
             FROM suppliers
             WHERE supplier_id = $1
               AND COALESCE(is_active, TRUE) = TRUE
+              AND deleted_at IS NULL
             `,
             [supplierId]
         );
 
         if (supplierResult.rows.length === 0) {
-            throw new Error("Supplier does not exist or is inactive.");
+            throwHttpError(
+                "Supplier does not exist, is inactive, or has been archived.",
+                404
+            );
         }
 
-        const supplier = supplierResult.rows[0];
-
-        // ----------------------------------------------------
-        // VALIDATE WAREHOUSE
-        // ----------------------------------------------------
+        /* Validate active warehouse. */
 
         const warehouseResult = await client.query(
             `
@@ -380,17 +359,19 @@ export async function PATCH(request, context) {
             FROM warehouses
             WHERE warehouse_id = $1
               AND COALESCE(is_active, TRUE) = TRUE
+              AND deleted_at IS NULL
             `,
             [warehouseId]
         );
 
         if (warehouseResult.rows.length === 0) {
-            throw new Error("Warehouse does not exist or is inactive.");
+            throwHttpError(
+                "Warehouse does not exist, is inactive, or has been archived.",
+                404
+            );
         }
 
-        // ----------------------------------------------------
-        // LOCK AND VALIDATE SOURCE DOCUMENT
-        // ----------------------------------------------------
+        /* Validate and lock source document. */
 
         if (sourceType === "PURCHASE_ORDER") {
             const poResult = await client.query(
@@ -402,25 +383,30 @@ export async function PATCH(request, context) {
                 FROM purchase_orders
                 WHERE purchase_order_id = $1
                   AND company_id = $2
+                  AND deleted_at IS NULL
                 FOR UPDATE
                 `,
                 [purchaseOrderId, companyId]
             );
 
             if (poResult.rows.length === 0) {
-                throw new Error("Linked Purchase Order not found.");
+                throwHttpError(
+                    "Linked Purchase Order not found or archived.",
+                    404
+                );
             }
 
             const po = poResult.rows[0];
 
-            if (String(po.status).toUpperCase() !== "APPROVED") {
-                throw new Error(
-                    "Only approved Purchase Orders can be received."
+            if (String(po.status || "").toUpperCase() !== "APPROVED") {
+                throwHttpError(
+                    "Only approved Purchase Orders can be received.",
+                    409
                 );
             }
 
             if (Number(po.supplier_id) !== supplierId) {
-                throw new Error(
+                throwHttpError(
                     "Supplier does not match the Purchase Order."
                 );
             }
@@ -437,13 +423,17 @@ export async function PATCH(request, context) {
                 FROM pending_item_receipts
                 WHERE pending_item_receipt_id = $1
                   AND company_id = $2
+                  AND deleted_at IS NULL
                 FOR UPDATE
                 `,
                 [pendingItemReceiptId, companyId]
             );
 
             if (pendingResult.rows.length === 0) {
-                throw new Error("Pending Item Receipt not found.");
+                throwHttpError(
+                    "Pending Item Receipt not found or archived.",
+                    404
+                );
             }
 
             const pending = pendingResult.rows[0];
@@ -453,23 +443,75 @@ export async function PATCH(request, context) {
                     String(pending.status || "").toUpperCase()
                 )
             ) {
-                throw new Error(
-                    "This Pending Item Receipt cannot be received."
+                throwHttpError(
+                    "This Pending Item Receipt cannot be received.",
+                    409
                 );
             }
 
             if (Number(pending.supplier_id) !== supplierId) {
-                throw new Error(
+                throwHttpError(
                     "Supplier does not match the Pending Item Receipt."
                 );
             }
+
+            /* Validate linked PO, if this pending receipt has one. */
+
+            if (pending.purchase_order_id) {
+                const linkedPoId = positiveId(
+                    pending.purchase_order_id
+                );
+
+                if (!linkedPoId) {
+                    throwHttpError(
+                        "The linked Purchase Order reference is invalid.",
+                        409
+                    );
+                }
+
+                const linkedPoResult = await client.query(
+                    `
+                    SELECT
+                        purchase_order_id,
+                        supplier_id,
+                        status
+                    FROM purchase_orders
+                    WHERE purchase_order_id = $1
+                      AND company_id = $2
+                      AND deleted_at IS NULL
+                    FOR UPDATE
+                    `,
+                    [linkedPoId, companyId]
+                );
+
+                if (linkedPoResult.rows.length === 0) {
+                    throwHttpError(
+                        "The Purchase Order linked to this Pending Item Receipt was not found or has been archived.",
+                        404
+                    );
+                }
+
+                const linkedPo = linkedPoResult.rows[0];
+
+                if (
+                    String(linkedPo.status || "").toUpperCase() !==
+                    "APPROVED"
+                ) {
+                    throwHttpError(
+                        "The linked Purchase Order is no longer approved.",
+                        409
+                    );
+                }
+
+                if (Number(linkedPo.supplier_id) !== supplierId) {
+                    throwHttpError(
+                        "Supplier does not match the linked Purchase Order."
+                    );
+                }
+            }
         }
 
-        // ----------------------------------------------------
-        // GET ITEMS
-        // If body.items is omitted, preserve existing items.
-        // If supplied, replace all draft items.
-        // ----------------------------------------------------
+        /* Get submitted items or preserve existing draft items. */
 
         let submittedItems = body.items;
 
@@ -498,13 +540,13 @@ export async function PATCH(request, context) {
         }
 
         if (!Array.isArray(submittedItems) || submittedItems.length === 0) {
-            throw new Error("Please add at least one receipt item.");
+            throwHttpError("Please add at least one receipt item.");
         }
 
         const normalizedItems = [];
 
         for (let index = 0; index < submittedItems.length; index++) {
-            const item = submittedItems[index];
+            const item = submittedItems[index] || {};
 
             const productId = item.productId
                 ? positiveId(item.productId)
@@ -524,25 +566,30 @@ export async function PATCH(request, context) {
             ).trim();
 
             const uom = String(item.uom || "").trim();
-
             const quantity = Number(item.quantityReceived);
             const unitCost = Number(item.unitCost ?? 0);
 
             if (!description) {
-                throw new Error(
+                throwHttpError(
                     `Item ${index + 1}: description is required.`
                 );
             }
 
             if (!validQuantity(quantity)) {
-                throw new Error(
+                throwHttpError(
                     `Item ${index + 1}: quantity must be greater than zero.`
                 );
             }
 
             if (!validCost(unitCost)) {
-                throw new Error(
+                throwHttpError(
                     `Item ${index + 1}: unit cost cannot be negative.`
+                );
+            }
+
+            if (item.productId && !productId) {
+                throwHttpError(
+                    `Item ${index + 1}: invalid product reference.`
                 );
             }
 
@@ -550,7 +597,7 @@ export async function PATCH(request, context) {
                 sourceType === "PURCHASE_ORDER" &&
                 !purchaseOrderItemId
             ) {
-                throw new Error(
+                throwHttpError(
                     `Item ${index + 1}: Purchase Order item reference is required.`
                 );
             }
@@ -559,7 +606,7 @@ export async function PATCH(request, context) {
                 sourceType === "PENDING_ITEM_RECEIPT" &&
                 !pendingItemReceiptItemId
             ) {
-                throw new Error(
+                throwHttpError(
                     `Item ${index + 1}: Pending Item Receipt item reference is required.`
                 );
             }
@@ -576,31 +623,29 @@ export async function PATCH(request, context) {
             });
         }
 
-        // ----------------------------------------------------
-        // PREVENT DUPLICATE SOURCE ITEM REFERENCES
-        // ----------------------------------------------------
+        /* Prevent duplicate source item references. */
 
-        const referenceIds = normalizedItems.map((item) => {
-            if (sourceType === "PURCHASE_ORDER") {
-                return item.purchaseOrderItemId;
-            }
+        const referenceIds = normalizedItems
+            .map((item) => {
+                if (sourceType === "PURCHASE_ORDER") {
+                    return item.purchaseOrderItemId;
+                }
 
-            if (sourceType === "PENDING_ITEM_RECEIPT") {
-                return item.pendingItemReceiptItemId;
-            }
+                if (sourceType === "PENDING_ITEM_RECEIPT") {
+                    return item.pendingItemReceiptItemId;
+                }
 
-            return null;
-        }).filter(Boolean);
+                return null;
+            })
+            .filter(Boolean);
 
         if (new Set(referenceIds).size !== referenceIds.length) {
-            throw new Error(
+            throwHttpError(
                 "The same source item cannot be added more than once."
             );
         }
 
-        // ----------------------------------------------------
-        // VALIDATE PRODUCTS AND SOURCE QUANTITIES
-        // ----------------------------------------------------
+        /* Validate products and source quantities. */
 
         for (const item of normalizedItems) {
             if (item.productId) {
@@ -609,22 +654,21 @@ export async function PATCH(request, context) {
                     SELECT product_id, is_active
                     FROM products
                     WHERE product_id = $1
+                      AND COALESCE(is_active, TRUE) = TRUE
+                      AND deleted_at IS NULL
                     `,
                     [item.productId]
                 );
 
                 if (productResult.rows.length === 0) {
-                    throw new Error(
-                        `Product not found: ${item.description}`
-                    );
-                }
-
-                if (productResult.rows[0].is_active === false) {
-                    throw new Error(
-                        `Product is inactive: ${item.description}`
+                    throwHttpError(
+                        `Product does not exist, is inactive, or has been archived: ${item.description}`,
+                        404
                     );
                 }
             }
+
+            /* Purchase Order item validation. */
 
             if (sourceType === "PURCHASE_ORDER") {
                 const poItemResult = await client.query(
@@ -642,8 +686,9 @@ export async function PATCH(request, context) {
                 );
 
                 if (poItemResult.rows.length === 0) {
-                    throw new Error(
-                        `Purchase Order item not found: ${item.description}`
+                    throwHttpError(
+                        `Purchase Order item not found: ${item.description}`,
+                        404
                     );
                 }
 
@@ -653,7 +698,7 @@ export async function PATCH(request, context) {
                     item.productId &&
                     Number(poItem.product_id) !== item.productId
                 ) {
-                    throw new Error(
+                    throwHttpError(
                         `Product does not match Purchase Order item: ${item.description}`
                     );
                 }
@@ -672,7 +717,8 @@ export async function PATCH(request, context) {
 
                     WHERE iri.purchase_order_item_id = $1
                       AND ir.company_id = $2
-                      AND UPPER(ir.status) = 'APPROVED'
+                      AND ir.deleted_at IS NULL
+                      AND UPPER(COALESCE(ir.status, '')) = 'APPROVED'
                     `,
                     [item.purchaseOrderItemId, companyId]
                 );
@@ -685,15 +731,21 @@ export async function PATCH(request, context) {
                     Number(poItem.quantity) - alreadyReceived;
 
                 if (item.quantity > remaining + 1) {
-                    throw new Error(
-                        `${item.description}: only ${Math.max(0, remaining)} units remain on the Purchase Order.`
+                    throwHttpError(
+                        `${item.description}: only ${Math.max(0, remaining)} units remain on the Purchase Order.`,
+                        409
                     );
                 }
 
-                if (item.unitCost === 0 && Number(poItem.unit_price) > 0) {
+                if (
+                    item.unitCost === 0 &&
+                    Number(poItem.unit_price) > 0
+                ) {
                     item.unitCost = Number(poItem.unit_price);
                 }
             }
+
+            /* Pending Item Receipt item validation. */
 
             if (sourceType === "PENDING_ITEM_RECEIPT") {
                 const pendingItemResult = await client.query(
@@ -714,8 +766,9 @@ export async function PATCH(request, context) {
                 );
 
                 if (pendingItemResult.rows.length === 0) {
-                    throw new Error(
-                        `Pending receipt item not found: ${item.description}`
+                    throwHttpError(
+                        `Pending receipt item not found: ${item.description}`,
+                        404
                     );
                 }
 
@@ -725,7 +778,7 @@ export async function PATCH(request, context) {
                     item.productId &&
                     Number(pendingItem.product_id) !== item.productId
                 ) {
-                    throw new Error(
+                    throwHttpError(
                         `Product does not match Pending Item Receipt: ${item.description}`
                     );
                 }
@@ -744,7 +797,8 @@ export async function PATCH(request, context) {
 
                     WHERE iri.pending_item_receipt_item_id = $1
                       AND ir.company_id = $2
-                      AND UPPER(ir.status) = 'APPROVED'
+                      AND ir.deleted_at IS NULL
+                      AND UPPER(COALESCE(ir.status, '')) = 'APPROVED'
                     `,
                     [
                         item.pendingItemReceiptItemId,
@@ -761,32 +815,35 @@ export async function PATCH(request, context) {
                     pendingAlreadyReceived;
 
                 if (item.quantity > pendingRemaining + 1) {
-                    throw new Error(
-                        `${item.description}: only ${Math.max(0, pendingRemaining)} units remain on the Pending Item Receipt.`
+                    throwHttpError(
+                        `${item.description}: only ${Math.max(0, pendingRemaining)} units remain on the Pending Item Receipt.`,
+                        409
                     );
                 }
 
-                // Also check the linked PO quantity, if applicable.
+                /* Validate linked PO quantity, if applicable. */
+
                 if (
                     pendingItem.purchase_order_item_id &&
-                    receipt.purchase_order_id
+                    purchaseOrderId
                 ) {
                     const poItemResult = await client.query(
                         `
-                        SELECT quantity
+                        SELECT quantity, unit_price
                         FROM purchase_order_items
                         WHERE purchase_order_item_id = $1
                           AND purchase_order_id = $2
                         `,
                         [
                             pendingItem.purchase_order_item_id,
-                            receipt.purchase_order_id,
+                            purchaseOrderId,
                         ]
                     );
 
                     if (poItemResult.rows.length === 0) {
-                        throw new Error(
-                            `Linked Purchase Order item not found: ${item.description}`
+                        throwHttpError(
+                            `Linked Purchase Order item not found: ${item.description}`,
+                            404
                         );
                     }
 
@@ -805,7 +862,8 @@ export async function PATCH(request, context) {
 
                         WHERE iri.purchase_order_item_id = $1
                           AND ir.company_id = $2
-                          AND UPPER(ir.status) = 'APPROVED'
+                          AND ir.deleted_at IS NULL
+                          AND UPPER(COALESCE(ir.status, '')) = 'APPROVED'
                         `,
                         [
                             pendingItem.purchase_order_item_id,
@@ -822,8 +880,18 @@ export async function PATCH(request, context) {
                         poAlreadyReceived;
 
                     if (item.quantity > poRemaining + 1) {
-                        throw new Error(
-                            `${item.description}: only ${Math.max(0, poRemaining)} units remain on the Purchase Order.`
+                        throwHttpError(
+                            `${item.description}: only ${Math.max(0, poRemaining)} units remain on the Purchase Order.`,
+                            409
+                        );
+                    }
+
+                    if (
+                        item.unitCost === 0 &&
+                        Number(poItemResult.rows[0].unit_price) > 0
+                    ) {
+                        item.unitCost = Number(
+                            poItemResult.rows[0].unit_price
                         );
                     }
                 }
@@ -835,9 +903,7 @@ export async function PATCH(request, context) {
             }
         }
 
-        // ----------------------------------------------------
-        // UPDATE HEADER
-        // ----------------------------------------------------
+        /* Update draft header. */
 
         await client.query(
             `
@@ -849,9 +915,9 @@ export async function PATCH(request, context) {
                 remarks = $4,
                 updated_by = $5,
                 updated_at = CURRENT_TIMESTAMP
-
             WHERE item_receipt_id = $6
               AND company_id = $7
+              AND deleted_at IS NULL
             `,
             [
                 supplierId,
@@ -864,9 +930,7 @@ export async function PATCH(request, context) {
             ]
         );
 
-        // ----------------------------------------------------
-        // REPLACE DRAFT ITEMS
-        // ----------------------------------------------------
+        /* Replace draft items only. Preserve source references. */
 
         await client.query(
             `
@@ -922,6 +986,7 @@ export async function PATCH(request, context) {
             FROM item_receipts
             WHERE item_receipt_id = $1
               AND company_id = $2
+              AND deleted_at IS NULL
             `,
             [receiptId, companyId]
         );
@@ -934,28 +999,30 @@ export async function PATCH(request, context) {
             message: "Draft Item Receipt updated successfully.",
             receipt: updatedResult.rows[0],
         });
-
     } catch (error) {
-        if (transactionStarted) {
-            await client.query("ROLLBACK");
+        if (transactionStarted && client) {
+            try {
+                await client.query("ROLLBACK");
+            } catch (rollbackError) {
+                console.error(
+                    "ITEM RECEIPT UPDATE ROLLBACK ERROR:",
+                    rollbackError
+                );
+            }
+            transactionStarted = false;
         }
 
         return apiError(error);
-
     } finally {
         client?.release();
     }
 }
 
-// ============================================================
-// DELETE: DELETE DRAFT ITEM RECEIPT
-// ============================================================
+/* -------------------------------------------------------------------------- */
+/* DELETE: ARCHIVE DRAFT ITEM RECEIPT                                         */
+/* -------------------------------------------------------------------------- */
 
 export async function DELETE(request, context) {
-    let client;
-
-    let transactionStarted = false;
-
     try {
         const user = await getCurrentUser();
 
@@ -963,13 +1030,9 @@ export async function DELETE(request, context) {
             return validationError("Unauthorized.", 401);
         }
 
-        await requirePermission(
-            user,
-            "item_receipts",
-            "delete"
-        );
+        await requirePermission(user, "item_receipts", "delete");
 
-        const companyId = positiveId(user.companyId);
+        const companyId = getCompanyId(user);
         const receiptId = await getReceiptId(context);
 
         if (!companyId || !receiptId) {
@@ -978,74 +1041,82 @@ export async function DELETE(request, context) {
             );
         }
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
-        client = await db.connect();
 
-        await client.query("BEGIN");
-        transactionStarted = true;
+        const result = await archiveAndSoftDelete(
+            { user, db, companyId },
+            {
+                moduleKey: "item_receipts",
+                recordId: receiptId,
+                deletionReason: "Item Receipt archived by user",
 
-        const receiptResult = await client.query(
-            `
-            SELECT
-                item_receipt_id,
-                receipt_number,
-                status
-            FROM item_receipts
-            WHERE item_receipt_id = $1
-              AND company_id = $2
-            FOR UPDATE
-            `,
-            [receiptId, companyId]
+                validateRecord: async (client, record) => {
+                    /* Only draft receipts can be archived. */
+
+                    if (
+                        String(record.status || "").toUpperCase() !==
+                        "DRAFT"
+                    ) {
+                        return {
+                            status: 409,
+                            message:
+                                "Only draft Item Receipts can be archived. Approved receipts must remain because they may have affected inventory and accounting history.",
+                        };
+                    }
+
+                    /*
+                     * The FK check confirmed:
+                     * purchases.item_receipt_id references
+                     * item_receipts.item_receipt_id with RESTRICT.
+                     *
+                     * Protect this relationship before archiving.
+                     */
+
+                    const linkedPurchaseResult = await client.query(
+                        `
+                        SELECT 1
+                        FROM purchases
+                        WHERE item_receipt_id = $1
+                        LIMIT 1
+                        `,
+                        [record.item_receipt_id]
+                    );
+
+                    if (linkedPurchaseResult.rows.length > 0) {
+                        return {
+                            status: 409,
+                            message:
+                                "This Item Receipt cannot be archived because it is linked to a Purchase transaction.",
+                        };
+                    }
+
+                    /*
+                     * item_receipt_items has ON DELETE CASCADE.
+                     * The archive helper performs a soft delete only,
+                     * so these child lines remain untouched.
+                     *
+                     * No stock or accounting changes are performed here.
+                     */
+
+                    return null;
+                },
+            }
         );
 
-        if (receiptResult.rows.length === 0) {
-            await client.query("ROLLBACK");
-            transactionStarted = false;
-
-            return validationError("Item Receipt not found.", 404);
-        }
-
-        const receipt = receiptResult.rows[0];
-
-        if (String(receipt.status).toUpperCase() !== "DRAFT") {
-            await client.query("ROLLBACK");
-            transactionStarted = false;
-
+        if (!result.success) {
             return validationError(
-                "Only draft Item Receipts can be deleted. Approved receipts must not be deleted because they have affected inventory.",
-                409
+                result.message || "Unable to archive Item Receipt.",
+                result.status || 400
             );
         }
 
-        await client.query(
-            `
-            DELETE FROM item_receipts
-            WHERE item_receipt_id = $1
-              AND company_id = $2
-            `,
-            [receiptId, companyId]
-        );
-
-        // item_receipt_items are deleted automatically
-        // through the ON DELETE CASCADE foreign key.
-
-        await client.query("COMMIT");
-        transactionStarted = false;
-
         return NextResponse.json({
             success: true,
-            message: `Item Receipt ${receipt.receipt_number} deleted successfully.`,
+            message: "Item Receipt moved to Recycle Bin successfully.",
+            archiveId: result.archiveId,
+            receipt: result.record,
         });
-
     } catch (error) {
-        if (transactionStarted) {
-            await client.query("ROLLBACK");
-        }
-
         return apiError(error);
-
-    } finally {
-        client?.release();
     }
 }

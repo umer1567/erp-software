@@ -1,6 +1,7 @@
 
 import { NextResponse } from "next/server";
 import { getTenantContext, unauthorizedResponse } from "@/lib/tenant";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export async function PUT(request, { params }) {
   try {
@@ -34,6 +35,7 @@ export async function PUT(request, { params }) {
           conversion_factor = $3,
           updated_at = CURRENT_TIMESTAMP
       WHERE unit_id = $4
+      AND deleted_at IS NULL
       RETURNING *
       `,
       [unitName, barcode, conversionFactor, id]
@@ -68,66 +70,73 @@ export async function PUT(request, { params }) {
   }
 }
 
+
 export async function DELETE(request, { params }) {
-  const tenant = await getTenantContext();
-  if (!tenant) return unauthorizedResponse();
-  const { db } = tenant;
-  const client = await db.connect();
-
   try {
+    const tenant = await getTenantContext();
+    if (!tenant) return unauthorizedResponse();
+
     const { id } = await params;
-    await client.query("BEGIN");
+    const unitId = Number(id);
 
-    const result = await client.query(
-      "SELECT unit_id, is_base_unit FROM product_units WHERE unit_id = $1 FOR UPDATE",
-      [id]
-    );
-
-    if (result.rowCount === 0) {
-      await client.query("ROLLBACK");
+    if (!Number.isSafeInteger(unitId) || unitId <= 0) {
       return NextResponse.json(
-        { success: false, message: "Packaging unit not found." },
-        { status: 404 }
-      );
-    }
-
-    if (result.rows[0].is_base_unit) {
-      await client.query("ROLLBACK");
-      return NextResponse.json(
-        { success: false, message: "The base unit cannot be deleted." },
+        { success: false, message: "Invalid packaging unit ID." },
         { status: 400 }
       );
     }
 
-    const stock = await client.query(
-      "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM unit_stock WHERE unit_id = $1",
-      [id]
-    );
+    const result = await archiveAndSoftDelete(tenant, {
+      moduleKey: "product_units",
+      recordId: unitId,
 
-    if (Number(stock.rows[0].quantity) !== 0) {
-      await client.query("ROLLBACK");
+      validateRecord: async (client, record) => {
+        if (record.is_base_unit) {
+          return {
+            status: 400,
+            message: "The base unit cannot be deleted.",
+          };
+        }
+
+        const stock = await client.query(
+          `
+            SELECT COALESCE(SUM(quantity), 0) AS quantity
+            FROM unit_stock
+            WHERE unit_id = $1
+          `,
+          [unitId]
+        );
+
+        if (Number(stock.rows[0].quantity) !== 0) {
+          return {
+            status: 409,
+            message: "This unit still has stock. Convert or remove its stock before archiving it.",
+          };
+        }
+
+        return null;
+      },
+    });
+
+    if (!result.success) {
       return NextResponse.json(
-        { success: false, message: "This unit still has stock. Convert or remove its stock before deleting it." },
-        { status: 409 }
+        { success: false, message: result.message },
+        { status: result.status }
       );
     }
 
-    await client.query("DELETE FROM product_units WHERE unit_id = $1", [id]);
-    await client.query("COMMIT");
-
     return NextResponse.json({
       success: true,
-      message: "Packaging unit deleted.",
+      message: "Packaging unit moved to Recycle Bin successfully.",
+      recycleBinId: result.archiveId,
+      unit: result.record,
     });
   } catch (error) {
-    await client.query("ROLLBACK");
     console.error("PRODUCT UNIT DELETE ERROR:", error);
 
     return NextResponse.json(
-      { success: false, message: "Failed to delete packaging unit." },
+      { success: false, message: "Failed to archive packaging unit." },
       { status: 500 }
     );
-  } finally {
-    client.release();
   }
 }

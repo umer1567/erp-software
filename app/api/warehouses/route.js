@@ -68,6 +68,7 @@ export async function GET(request) {
         created_at,
         updated_at
       FROM warehouses
+      WHERE deleted_at IS NULL
       ORDER BY warehouse_id DESC
     `);
 

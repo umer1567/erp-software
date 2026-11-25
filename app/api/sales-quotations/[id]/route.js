@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getOperationalPool } from "@/lib/db";
 import { attachUserNames, getCompanyProfile } from "@/lib/tenant";
 import { authorizeSalesQuotations } from "@/lib/sales-quotations-auth";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export const runtime = "nodejs";
 
@@ -140,10 +141,14 @@ async function getQuotation(client, quotationId, companyId) {
             w.warehouse_name
         FROM sales_quotations q
         LEFT JOIN customers c
-            ON c.customer_id = q.customer_id
-        LEFT JOIN warehouses w
-            ON w.warehouse_id = q.warehouse_id
+    ON c.customer_id = q.customer_id
+   AND c.deleted_at IS NULL
+
+LEFT JOIN warehouses w
+    ON w.warehouse_id = q.warehouse_id
+   AND w.deleted_at IS NULL
         WHERE q.quotation_id = $1
+        AND q.deleted_at IS NULL
           AND q.company_id = $2
         `,
         [quotationId, companyId]
@@ -166,9 +171,9 @@ async function getQuotation(client, quotationId, companyId) {
     const lines = await client.query(
         `
         SELECT *
-        FROM sales_quotation_items
-        WHERE quotation_id = $1
-        ORDER BY line_number, quotation_item_id
+FROM sales_quotation_items
+WHERE quotation_id = $1
+ORDER BY line_number, quotation_item_id
         `,
         [quotationId]
     );
@@ -302,6 +307,28 @@ export async function PUT(request, context) {
 
         const totals = calculateItems(body.items);
 
+        for (const item of totals.items) {
+    if (item.productId === null) continue;
+
+    const productResult = await client.query(
+        `
+        SELECT product_id
+        FROM products
+        WHERE product_id = $1
+          AND is_active = TRUE
+          AND deleted_at IS NULL
+        `,
+        [item.productId]
+    );
+
+    if (!productResult.rows.length) {
+        return errorResponse(
+            `Product "${item.itemName}" is inactive, archived, or unavailable.`,
+            400
+        );
+    }
+}
+
         await client.query("BEGIN");
 
         const existing = await client.query(
@@ -310,6 +337,7 @@ export async function PUT(request, context) {
             FROM sales_quotations
             WHERE quotation_id = $1
               AND company_id = $2
+              AND deleted_at IS NULL
             FOR UPDATE
             `,
             [quotationId, companyId]
@@ -335,6 +363,7 @@ export async function PUT(request, context) {
                 `SELECT customer_id
                  FROM customers
                  WHERE customer_id = $1
+                 AND deleted_at IS NULL
                    AND is_active = TRUE`,
                 [customerId]
             );
@@ -347,9 +376,10 @@ export async function PUT(request, context) {
         if (warehouseId !== null) {
             const result = await client.query(
                 `SELECT warehouse_id
-                 FROM warehouses
-                 WHERE warehouse_id = $1
-                   AND is_active = TRUE`,
+FROM warehouses
+WHERE warehouse_id = $1
+  AND is_active = TRUE
+  AND deleted_at IS NULL`,
                 [warehouseId]
             );
 
@@ -383,7 +413,8 @@ export async function PUT(request, context) {
                 updated_by = $19,
                 updated_at = CURRENT_TIMESTAMP
             WHERE quotation_id = $20
-              AND company_id = $21
+  AND company_id = $21
+  AND deleted_at IS NULL
             `,
             [
                 customerId,
@@ -495,5 +526,91 @@ export async function PUT(request, context) {
         );
     } finally {
         client?.release();
+    }
+}
+// DELETE /api/sales-quotations/:id
+// A quotation can only be archived if it has not been converted
+// and has no Sales Order created from it.
+export async function DELETE(request, context) {
+    try {
+        const authorization = await authorizeSalesQuotations("delete");
+
+        if (!authorization.ok) {
+            return errorResponse(
+                authorization.message,
+                authorization.status
+            );
+        }
+
+        const params = await context.params;
+        const quotationId = Number(params.id);
+
+        if (!Number.isInteger(quotationId) || quotationId <= 0) {
+            return errorResponse("Invalid quotation ID.");
+        }
+
+        const companyId = authorization.user.companyId;
+        const db = await getOperationalPool(companyId);
+
+        const result = await archiveAndSoftDelete(
+            {
+                db,
+                companyId,
+                user: { userId: authorization.user.userId },
+            },
+            {
+                moduleKey: "sales_quotations",
+                recordId: quotationId,
+                deletionReason: "Sales Quotation archived",
+                validateRecord: async (client, record) => {
+                    if (
+                        String(record.status || "").trim().toLowerCase() ===
+                        "converted"
+                    ) {
+                        return {
+                            status: 409,
+                            message: "A converted Sales Quotation cannot be archived.",
+                        };
+                    }
+
+                    const linkedOrder = await client.query(
+                        `
+                        SELECT order_id
+                        FROM sales_orders
+                        WHERE company_id = $1
+                          AND source_quotation_id = $2
+                          
+                        LIMIT 1
+                        `,
+                        [companyId, quotationId]
+                    );
+
+                    if (linkedOrder.rowCount > 0) {
+                        return {
+                            status: 409,
+                            message: "This Sales Quotation is linked to a Sales Order and cannot be archived.",
+                        };
+                    }
+
+                    return null;
+                },
+            }
+        );
+
+        if (!result.success) {
+            return errorResponse(result.message, result.status);
+        }
+
+        return NextResponse.json({
+            success: true,
+            message: "Sales Quotation moved to the Recycle Bin.",
+        });
+    } catch (error) {
+        console.error("DELETE quotation error:", error);
+
+        return errorResponse(
+            "Unable to archive Sales Quotation.",
+            500
+        );
     }
 }
