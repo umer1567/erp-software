@@ -555,6 +555,7 @@ async function restoreCentralRole(archiveId, companyId) {
 /* Tenant record restore                                                      */
 /* -------------------------------------------------------------------------- */
 
+
 async function restoreTenantRecord(tenant, recycleBinId, companyId) {
     let client;
     let transactionStarted = false;
@@ -565,6 +566,7 @@ async function restoreTenantRecord(tenant, recycleBinId, companyId) {
         await client.query("BEGIN");
         transactionStarted = true;
 
+        // Archive ownership is verified using company_id.
         const archiveResult = await client.query(
             `
             SELECT
@@ -614,15 +616,16 @@ async function restoreTenantRecord(tenant, recycleBinId, companyId) {
             );
         }
 
+        // The tenant database already belongs to this company.
+        // Do not filter operational records by company_id.
         const originalResult = await client.query(
             `
             SELECT *
             FROM public.${config.table}
             WHERE ${config.idColumn} = $1
-              AND company_id = $2
             FOR UPDATE
             `,
-            [recordId, companyId]
+            [recordId]
         );
 
         if (originalResult.rowCount !== 1) {
@@ -642,6 +645,7 @@ async function restoreTenantRecord(tenant, recycleBinId, companyId) {
             return errorResponse("This record is already active.", 409);
         }
 
+        // Restore the original tenant record.
         const restoreResult = await client.query(
             `
             UPDATE public.${config.table}
@@ -649,23 +653,17 @@ async function restoreTenantRecord(tenant, recycleBinId, companyId) {
                 deleted_at = NULL,
                 deleted_by = NULL
             WHERE ${config.idColumn} = $1
-              AND company_id = $2
               AND deleted_at IS NOT NULL
             RETURNING ${config.idColumn}
             `,
-            [recordId, companyId]
+            [recordId]
         );
 
         if (restoreResult.rowCount !== 1) {
-            await client.query("ROLLBACK");
-            transactionStarted = false;
-
-            return errorResponse(
-                "The original record could not be restored.",
-                409
-            );
+            throw new Error("The original record could not be restored.");
         }
 
+        // Keep company_id filtering on the archive table.
         const archiveDelete = await client.query(
             `
             DELETE FROM public.recycle_bin_items
