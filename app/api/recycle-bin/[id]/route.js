@@ -637,6 +637,7 @@ async function permanentlyDeleteCentralRole(archiveId, companyId) {
 /* Tenant permanent deletion                                                  */
 /* -------------------------------------------------------------------------- */
 
+
 async function permanentlyDeleteTenantRecord(
     tenant,
     recycleBinId,
@@ -651,6 +652,7 @@ async function permanentlyDeleteTenantRecord(
         await client.query("BEGIN");
         transactionStarted = true;
 
+        // company_id belongs to the archive table, so KEEP this filter.
         const archiveResult = await client.query(
             `
             SELECT
@@ -700,15 +702,16 @@ async function permanentlyDeleteTenantRecord(
             );
         }
 
+        // Tenant database is already company-specific.
+        // Operational tables do NOT require company_id.
         const originalResult = await client.query(
             `
             SELECT *
             FROM public.${config.table}
             WHERE ${config.idColumn} = $1
-              AND company_id = $2
             FOR UPDATE
             `,
-            [recordId, companyId]
+            [recordId]
         );
 
         if (originalResult.rowCount !== 1) {
@@ -716,7 +719,7 @@ async function permanentlyDeleteTenantRecord(
             transactionStarted = false;
 
             return errorResponse(
-                "The original record no longer exists in this company. The archive entry has been preserved.",
+                "The original record no longer exists. The archive entry has been preserved.",
                 409
             );
         }
@@ -735,11 +738,10 @@ async function permanentlyDeleteTenantRecord(
             `
             DELETE FROM public.${config.table}
             WHERE ${config.idColumn} = $1
-              AND company_id = $2
               AND deleted_at IS NOT NULL
             RETURNING ${config.idColumn}
             `,
-            [recordId, companyId]
+            [recordId]
         );
 
         if (deleteResult.rowCount !== 1) {
@@ -752,6 +754,7 @@ async function permanentlyDeleteTenantRecord(
             );
         }
 
+        // Keep company_id here: this is the archive table.
         const archiveDelete = await client.query(
             `
             DELETE FROM public.recycle_bin_items
