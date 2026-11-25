@@ -1,14 +1,150 @@
 
 import { NextResponse } from "next/server";
-import { getTenantContext, unauthorizedResponse } from "@/lib/tenant";
+import {
+  getTenantContext,
+  unauthorizedResponse,
+} from "@/lib/tenant";
+import { hasPermission } from "@/lib/permissions";
 
-export async function PUT(request, { params }) {
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+const PERMISSION_KEY = "customers";
+
+// =====================================================
+// RESPONSE HELPERS
+// =====================================================
+
+function errorResponse(message, status) {
+  return NextResponse.json(
+    {
+      success: false,
+      message,
+    },
+    {
+      status,
+      headers: {
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+      },
+    }
+  );
+}
+
+function successResponse(data, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+    },
+  });
+}
+
+// =====================================================
+// AUTHENTICATION AND PERMISSION
+// =====================================================
+
+async function authorize(action) {
+  let tenant;
+
   try {
-    const tenant = await getTenantContext();
-    if (!tenant) return unauthorizedResponse();
-    const { db } = tenant;
+    tenant = await getTenantContext();
+  } catch (error) {
+    console.error("CUSTOMER AUTHENTICATION ERROR:", error);
 
-    const { id } = await params;
+    return {
+      tenant: null,
+      response: errorResponse(
+        "Unable to verify your login session.",
+        500
+      ),
+    };
+  }
+
+  if (!tenant) {
+    return {
+      tenant: null,
+      response: unauthorizedResponse(),
+    };
+  }
+
+  const roleId = tenant.user?.roleId ?? tenant.user?.role_id;
+
+  if (
+    roleId === null ||
+    roleId === undefined ||
+    !Number.isInteger(Number(roleId)) ||
+    Number(roleId) <= 0
+  ) {
+    return {
+      tenant: null,
+      response: errorResponse(
+        "Your account does not have a valid role.",
+        403
+      ),
+    };
+  }
+
+  try {
+    const allowed = await hasPermission(
+      Number(roleId),
+      PERMISSION_KEY,
+      action
+    );
+
+    if (!allowed) {
+      return {
+        tenant: null,
+        response: errorResponse(
+          `You do not have permission to ${action} customers.`,
+          403
+        ),
+      };
+    }
+
+    return {
+      tenant,
+      response: null,
+    };
+  } catch (error) {
+    console.error("CUSTOMER PERMISSION ERROR:", error);
+
+    return {
+      tenant: null,
+      response: errorResponse(
+        "Unable to verify customer permissions.",
+        500
+      ),
+    };
+  }
+}
+
+// =====================================================
+// ROUTE PARAMETER
+// =====================================================
+
+async function getCustomerId(context) {
+  const params = await context.params;
+  const id = Number(params?.id);
+
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+// =====================================================
+// PUT: UPDATE ACTIVE CUSTOMER
+// =====================================================
+
+export async function PUT(request, context) {
+  try {
+    const { tenant, response } = await authorize("update");
+
+    if (response) return response;
+
+    const customerId = await getCustomerId(context);
+
+    if (!customerId) {
+      return errorResponse("Invalid customer ID.", 400);
+    }
+
     const body = await request.json();
 
     const {
@@ -17,154 +153,234 @@ export async function PUT(request, { params }) {
       phone,
       email,
       address,
-      receivableAccountId,
-      openingBalance,
-      creditLimit,
-      isActive,
+      openingBalance = 0,
+      creditLimit = 0,
+      isActive = true,
     } = body;
 
-    if (!customerCode || !customerName) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: "Customer code and customer name are required.",
-        },
-        { status: 400 }
+    if (
+      typeof customerCode !== "string" ||
+      !customerCode.trim() ||
+      typeof customerName !== "string" ||
+      !customerName.trim()
+    ) {
+      return errorResponse(
+        "Customer code and customer name are required.",
+        400
       );
     }
 
-    if (!receivableAccountId) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: "Receivable account is required.",
-        },
-        { status: 400 }
-      );
-    }
-
-    const result = await db.query(
+    const result = await tenant.db.query(
       `
-      UPDATE customers
-      SET
-        customer_code = $1,
-        customer_name = $2,
-        phone = $3,
-        email = $4,
-        address = $5,
-        receivable_account_id = $6,
-        opening_balance = $7,
-        credit_limit = $8,
-        is_active = $9,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE customer_id = $10
-      RETURNING *
+        UPDATE customers
+        SET
+          customer_code = $1,
+          customer_name = $2,
+          phone = $3,
+          email = $4,
+          address = $5,
+          opening_balance = $6,
+          credit_limit = $7,
+          is_active = $8,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE customer_id = $9
+          AND deleted_at IS NULL
+        RETURNING *
       `,
       [
-        customerCode,
-        customerName,
+        customerCode.trim(),
+        customerName.trim(),
         phone || null,
         email || null,
         address || null,
-        Number(receivableAccountId),
         Number(openingBalance) || 0,
         Number(creditLimit) || 0,
         isActive !== false,
-        id,
+        customerId,
       ]
     );
 
-    if (result.rows.length === 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: "Customer not found.",
-        },
-        { status: 404 }
-      );
+    if (result.rowCount === 0) {
+      return errorResponse("Active customer not found.", 404);
     }
 
-    return NextResponse.json({
+    return successResponse({
       success: true,
       message: "Customer updated successfully.",
       customer: result.rows[0],
     });
   } catch (error) {
-    console.error("CUSTOMER UPDATE ERROR:", error);
+    console.error("PUT CUSTOMER ERROR:", error);
 
     if (error.code === "23505") {
-      return NextResponse.json(
-        {
-          success: false,
-          message: "Customer code already exists.",
-        },
-        { status: 409 }
+      return errorResponse(
+        "Customer code already exists.",
+        409
       );
     }
 
-    return NextResponse.json(
-      {
-        success: false,
-        message: "Failed to update customer.",
-        error: error.message,
-      },
-      { status: 500 }
+    if (error.code === "23503") {
+      return errorResponse(
+        "Customer data is linked to another record.",
+        409
+      );
+    }
+
+    return errorResponse(
+      "An unexpected error occurred while updating the customer.",
+      500
     );
   }
 }
 
-export async function DELETE(request, { params }) {
+// =====================================================
+// DELETE: MOVE CUSTOMER TO RECYCLE BIN
+// =====================================================
+
+export async function DELETE(request, context) {
+  const { tenant, response } = await authorize("delete");
+
+  if (response) return response;
+
+  const customerId = await getCustomerId(context);
+
+  if (!customerId) {
+    return errorResponse("Invalid customer ID.", 400);
+  }
+
+  let client;
+
   try {
-    const tenant = await getTenantContext();
-    if (!tenant) return unauthorizedResponse();
-    const { db } = tenant;
+    client = await tenant.db.connect();
 
-    const { id } = await params;
+    await client.query("BEGIN");
 
-    const result = await db.query(
+    // Lock the customer to prevent concurrent deletion.
+    const customerResult = await client.query(
       `
-      DELETE FROM customers
-      WHERE customer_id = $1
-      RETURNING customer_id
+        SELECT *
+        FROM customers
+        WHERE customer_id = $1
+          AND deleted_at IS NULL
+        FOR UPDATE
       `,
-      [id]
+      [customerId]
     );
 
-    if (result.rows.length === 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: "Customer not found.",
-        },
-        { status: 404 }
+    if (customerResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+
+      return errorResponse(
+        "Active customer not found.",
+        404
       );
     }
 
-    return NextResponse.json({
+    const customer = customerResult.rows[0];
+
+    const userId =
+      tenant.user?.userId ??
+      tenant.user?.user_id ??
+      tenant.user?.id ??
+      null;
+
+    const recordLabel = [
+      customer.customer_name,
+      customer.customer_code
+        ? `(${customer.customer_code})`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    // Save a complete snapshot before archiving.
+    const archiveResult = await client.query(
+      `
+        INSERT INTO recycle_bin_items (
+          company_id,
+          module_key,
+          source_table,
+          source_record_id,
+          record_label,
+          deleted_by,
+          deletion_reason,
+          record_snapshot,
+          relationship_snapshot
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb
+        )
+        RETURNING recycle_bin_id
+      `,
+      [
+        tenant.companyId,
+        "customers",
+        "customers",
+        String(customer.customer_id),
+        recordLabel,
+        userId,
+        "Customer deleted from Customers module",
+        JSON.stringify(customer),
+        JSON.stringify([]),
+      ]
+    );
+
+    // Soft delete: preserve the original customer row.
+    await client.query(
+      `
+        UPDATE customers
+        SET
+          deleted_at = CURRENT_TIMESTAMP,
+          deleted_by = $1
+        WHERE customer_id = $2
+          AND deleted_at IS NULL
+      `,
+      [userId, customerId]
+    );
+
+    await client.query("COMMIT");
+
+    return successResponse({
       success: true,
-      message: "Customer deleted successfully.",
+      message: "Customer moved to Recycle Bin successfully.",
+      recycleBinId: archiveResult.rows[0].recycle_bin_id,
     });
   } catch (error) {
-    console.error("CUSTOMER DELETE ERROR:", error);
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error(
+          "CUSTOMER DELETE ROLLBACK ERROR:",
+          rollbackError
+        );
+      }
+    }
 
-    if (error.code === "23503") {
-      return NextResponse.json(
-        {
-          success: false,
-          message:
-            "This customer cannot be deleted because sales records already exist.",
-        },
-        { status: 409 }
+    console.error(
+      "DELETE CUSTOMER / RECYCLE BIN ERROR:",
+      error
+    );
+
+    if (error.code === "23505") {
+      return errorResponse(
+        "This customer already has an entry in the Recycle Bin.",
+        409
       );
     }
 
-    return NextResponse.json(
-      {
-        success: false,
-        message: "Failed to delete customer.",
-        error: error.message,
-      },
-      { status: 500 }
+    if (error.code === "23503") {
+      return errorResponse(
+        "Customer archive references an invalid company or user.",
+        409
+      );
+    }
+
+    return errorResponse(
+      "An unexpected error occurred while moving the customer to the Recycle Bin.",
+      500
     );
+  } finally {
+    client?.release();
   }
 }

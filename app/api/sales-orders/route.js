@@ -1,3 +1,4 @@
+
 import { NextResponse } from "next/server";
 import pool, { getOperationalPool } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
@@ -92,6 +93,10 @@ function calculateItems(items) {
         throw new Error("Add at least one transaction line.");
     }
 
+    if (items.length > 500) {
+        throw new Error("A Sales Order cannot contain more than 500 lines.");
+    }
+
     let subtotal = 0;
     let taxTotal = 0;
 
@@ -124,9 +129,12 @@ function calculateItems(items) {
             discountPercent < 0 ||
             discountPercent > 100 ||
             !Number.isFinite(taxRate) ||
-            taxRate < 0
+            taxRate < 0 ||
+            taxRate > 100
         ) {
-            throw new Error(`Invalid quantity, price, discount, or tax on line ${index + 1}.`);
+            throw new Error(
+                `Invalid quantity, price, discount, or tax on line ${index + 1}.`
+            );
         }
 
         if (
@@ -138,9 +146,8 @@ function calculateItems(items) {
 
         const unitPrice = retailPrice * (1 - discountPercent / 100);
         const amount = Math.round(quantity * unitPrice * 100) / 100;
-        const taxAmount = Math.round(amount * taxRate) / 100;
-        const grossAmount =
-            Math.round((amount + taxAmount) * 100) / 100;
+        const taxAmount = Math.round((amount * taxRate) / 100 * 100) / 100;
+        const grossAmount = Math.round((amount + taxAmount) * 100) / 100;
 
         subtotal += amount;
         taxTotal += taxAmount;
@@ -181,87 +188,131 @@ export async function GET() {
     try {
         const context = await getOrderContext();
         await checkPermission(context, "view");
+
         const db = await getOperationalPool(context.companyId);
 
-        const [ordersResult, customersResult, productsResult, warehousesResult, companyResult] =
-            await Promise.all([
-                db.query(
-                    `
-                    SELECT
-                        so.order_id,
-                        so.order_number,
-                        so.source_quotation_id,
-                        so.transaction_date,
-                        so.status,
-                        so.document_status,
-                        so.department,
-                        so.project,
-                        so.order_class,
-                        so.sales_rep,
-                        so.payment_term,
-                        so.currency,
-                        so.exchange_rate,
-                        so.subtotal,
-                        so.tax_amount,
-                        so.gross_amount,
-                        so.memo,
-                        so.created_at,
-                        so.updated_at,
-                        c.customer_id,
-                        c.customer_name,
-                        c.customer_code,
-                        c.credit_limit AS current_credit_limit,
-                        w.warehouse_id,
-                        w.warehouse_name,
-                        q.quotation_number AS source_quotation_number
-                    FROM sales_orders so
-                    LEFT JOIN customers c
-                        ON c.customer_id = so.customer_id
-                    LEFT JOIN warehouses w
-                        ON w.warehouse_id = so.warehouse_id
-                    LEFT JOIN sales_quotations q
-                        ON q.quotation_id = so.source_quotation_id
-                    WHERE so.company_id = $1
-                    ORDER BY so.transaction_date DESC, so.order_id DESC
-                    `,
-                    [context.companyId]
-                ),
-                db.query(
-                    `
-                    SELECT customer_id, customer_code, customer_name,
-                           phone, email, address, credit_limit, opening_balance
-                    FROM customers
-                    WHERE is_active = TRUE
-                    ORDER BY customer_name
-                    `
-                ),
-                db.query(
-                    `
-                    SELECT product_id, sku, product_name, description,
-                           unit, sales_unit, sale_price, minimum_stock,
-                           barcode, is_active
-                    FROM products
-                    WHERE is_active = TRUE
-                    ORDER BY product_name
-                    `
-                ),
-                db.query(
-                    `
-                    SELECT warehouse_id, warehouse_code, warehouse_name, location
-                    FROM warehouses
-                    WHERE is_active = TRUE
-                    ORDER BY warehouse_name
-                    `
-                ),
-                pool.query(
-                    `
-                    SELECT company_id, company_name, currency, address, phone, email, logo_url
-                    FROM companies
-                    WHERE company_id = $1
-                    `,
-                    [context.companyId]
-                ),
-            ]);
+        const [
+            ordersResult,
+            customersResult,
+            productsResult,
+            warehousesResult,
+            companyResult,
+        ] = await Promise.all([
+            db.query(
+                `
+                SELECT
+                    so.order_id,
+                    so.order_number,
+                    so.source_quotation_id,
+                    so.transaction_date,
+                    so.status,
+                    so.document_status,
+                    so.department,
+                    so.project,
+                    so.order_class,
+                    so.sales_rep,
+                    so.payment_term,
+                    so.currency,
+                    so.exchange_rate,
+                    so.subtotal,
+                    so.tax_amount,
+                    so.gross_amount,
+                    so.memo,
+                    so.created_at,
+                    so.updated_at,
+                    c.customer_id,
+                    c.customer_name,
+                    c.customer_code,
+                    c.credit_limit AS current_credit_limit,
+                    w.warehouse_id,
+                    w.warehouse_name,
+                    q.quotation_number AS source_quotation_number
+                FROM sales_orders so
+                LEFT JOIN customers c
+                    ON c.customer_id = so.customer_id
+                   AND c.deleted_at IS NULL
+                LEFT JOIN warehouses w
+                    ON w.warehouse_id = so.warehouse_id
+                   AND w.deleted_at IS NULL
+                LEFT JOIN sales_quotations q
+                    ON q.quotation_id = so.source_quotation_id
+                   AND q.company_id = so.company_id
+                   AND q.deleted_at IS NULL
+                WHERE so.company_id = $1
+                  AND so.deleted_at IS NULL
+                ORDER BY so.transaction_date DESC, so.order_id DESC
+                `,
+                [context.companyId]
+            ),
+
+            db.query(
+                `
+                SELECT
+                    customer_id,
+                    customer_code,
+                    customer_name,
+                    phone,
+                    email,
+                    address,
+                    credit_limit,
+                    opening_balance
+                FROM customers
+                WHERE is_active = TRUE
+                  AND deleted_at IS NULL
+                ORDER BY customer_name
+                `
+            ),
+
+            db.query(
+                `
+                SELECT
+                    product_id,
+                    sku,
+                    product_name,
+                    description,
+                    unit,
+                    sales_unit,
+                    sale_price,
+                    minimum_stock,
+                    barcode,
+                    is_active
+                FROM products
+                WHERE is_active = TRUE
+                  AND deleted_at IS NULL
+                ORDER BY product_name
+                `
+            ),
+
+            db.query(
+                `
+                SELECT
+                    warehouse_id,
+                    warehouse_code,
+                    warehouse_name,
+                    location
+                FROM warehouses
+                WHERE is_active = TRUE
+                  AND deleted_at IS NULL
+                ORDER BY warehouse_name
+                `
+            ),
+
+            pool.query(
+                `
+                SELECT
+                    company_id,
+                    company_name,
+                    currency,
+                    address,
+                    phone,
+                    email,
+                    logo_url
+                FROM companies
+                WHERE company_id = $1
+                `,
+                [context.companyId]
+            ),
+        ]);
 
         return NextResponse.json({
             success: true,
@@ -272,9 +323,21 @@ export async function GET() {
             company: companyResult.rows[0] || null,
             permissions: {
                 canView: true,
-                canCreate: await hasPermission(context.roleId, "sales_orders", "create"),
-                canUpdate: await hasPermission(context.roleId, "sales_orders", "update"),
-                canDelete: await hasPermission(context.roleId, "sales_orders", "delete"),
+                canCreate: await hasPermission(
+                    context.roleId,
+                    "sales_orders",
+                    "create"
+                ),
+                canUpdate: await hasPermission(
+                    context.roleId,
+                    "sales_orders",
+                    "update"
+                ),
+                canDelete: await hasPermission(
+                    context.roleId,
+                    "sales_orders",
+                    "delete"
+                ),
             },
         });
     } catch (error) {
@@ -289,28 +352,56 @@ export async function POST(request) {
     try {
         const context = await getOrderContext();
         await checkPermission(context, "create");
+
         const db = await getOperationalPool(context.companyId);
         client = await db.connect();
 
         const body = await request.json();
         const itemsResult = calculateItems(body.items);
 
-        const customerId = body.customer_id ? Number(body.customer_id) : null;
-        const warehouseId = body.warehouse_id ? Number(body.warehouse_id) : null;
-        const sourceQuotationId = body.source_quotation_id
-            ? Number(body.source_quotation_id)
-            : null;
+        const customerId =
+            body.customer_id === "" || body.customer_id == null
+                ? null
+                : Number(body.customer_id);
 
-        if (!customerId || !Number.isSafeInteger(customerId) || customerId <= 0) {
+        const warehouseId =
+            body.warehouse_id === "" || body.warehouse_id == null
+                ? null
+                : Number(body.warehouse_id);
+
+        const sourceQuotationId =
+            body.source_quotation_id === "" ||
+            body.source_quotation_id == null
+                ? null
+                : Number(body.source_quotation_id);
+
+        if (
+            !Number.isSafeInteger(customerId) ||
+            customerId <= 0
+        ) {
             return NextResponse.json(
                 { success: false, message: "Select a customer." },
                 { status: 400 }
             );
         }
 
-        if (!warehouseId || !Number.isSafeInteger(warehouseId) || warehouseId <= 0) {
+        if (
+            !Number.isSafeInteger(warehouseId) ||
+            warehouseId <= 0
+        ) {
             return NextResponse.json(
                 { success: false, message: "Select a From Location." },
+                { status: 400 }
+            );
+        }
+
+        if (
+            sourceQuotationId !== null &&
+            (!Number.isSafeInteger(sourceQuotationId) ||
+                sourceQuotationId <= 0)
+        ) {
+            return NextResponse.json(
+                { success: false, message: "Invalid source quotation." },
                 { status: 400 }
             );
         }
@@ -341,13 +432,23 @@ export async function POST(request) {
             [context.companyId]
         );
 
+        if (!company.rows.length) {
+            return NextResponse.json(
+                { success: false, message: "Company information was not found." },
+                { status: 404 }
+            );
+        }
+
         await client.query("BEGIN");
 
         const customer = await client.query(
             `
             SELECT customer_id, credit_limit
             FROM customers
-            WHERE customer_id = $1 AND is_active = TRUE
+            WHERE customer_id = $1
+              AND is_active = TRUE
+              AND deleted_at IS NULL
+            FOR SHARE
             `,
             [customerId]
         );
@@ -365,7 +466,10 @@ export async function POST(request) {
             `
             SELECT warehouse_id
             FROM warehouses
-            WHERE warehouse_id = $1 AND is_active = TRUE
+            WHERE warehouse_id = $1
+              AND is_active = TRUE
+              AND deleted_at IS NULL
+            FOR SHARE
             `,
             [warehouseId]
         );
@@ -381,7 +485,9 @@ export async function POST(request) {
 
         const currency = String(
             body.currency || company.rows[0]?.currency || "PKR"
-        ).trim().toUpperCase();
+        )
+            .trim()
+            .toUpperCase();
 
         const exchangeRate = toNumber(body.exchange_rate, 1);
 
@@ -397,38 +503,67 @@ export async function POST(request) {
         if (sourceQuotationId !== null) {
             const quotation = await client.query(
                 `
-                SELECT quotation_id, status, company_id
+                SELECT quotation_id, status
                 FROM sales_quotations
                 WHERE quotation_id = $1
+                  AND company_id = $2
+                  AND deleted_at IS NULL
                 FOR UPDATE
                 `,
-                [sourceQuotationId]
+                [sourceQuotationId, context.companyId]
             );
 
-            if (
-                !quotation.rows.length ||
-                Number(quotation.rows[0].company_id) !== context.companyId
-            ) {
+            if (!quotation.rows.length) {
                 await client.query("ROLLBACK");
 
                 return NextResponse.json(
-                    { success: false, message: "The source quotation was not found." },
+                    { success: false, message: "The source quotation was not found or has been archived." },
                     { status: 404 }
                 );
             }
 
-            if (String(quotation.rows[0].status).toUpperCase() !== "APPROVED") {
+            if (
+                String(quotation.rows[0].status).toUpperCase() !== "APPROVED"
+            ) {
                 await client.query("ROLLBACK");
 
                 return NextResponse.json(
-                    { success: false, message: "Only an approved quotation can be converted into a Sales Order." },
+                    {
+                        success: false,
+                        message: "Only an approved quotation can be converted into a Sales Order.",
+                    },
                     { status: 400 }
                 );
             }
         }
 
+        // Validate every linked product before inserting the order.
+        for (const item of itemsResult.items) {
+            if (item.product_id === null) continue;
+
+            const product = await client.query(
+                `
+                SELECT product_id
+                FROM products
+                WHERE product_id = $1
+                  AND is_active = TRUE
+                  AND deleted_at IS NULL
+                FOR SHARE
+                `,
+                [item.product_id]
+            );
+
+            if (!product.rows.length) {
+                throw new Error(`Product "${item.item_name}" is unavailable or archived.`);
+            }
+        }
+
         const sequenceResult = await client.query(
-            `SELECT nextval(pg_get_serial_sequence('sales_orders', 'order_id')) AS order_id`
+            `
+            SELECT nextval(
+                pg_get_serial_sequence('sales_orders', 'order_id')
+            ) AS order_id
+            `
         );
 
         const orderId = Number(sequenceResult.rows[0].order_id);
@@ -497,24 +632,26 @@ export async function POST(request) {
         );
 
         for (const item of itemsResult.items) {
-            if (item.product_id !== null) {
-                const product = await client.query(
-                    `SELECT product_id FROM products WHERE product_id = $1 AND is_active = TRUE`,
-                    [item.product_id]
-                );
-
-                if (!product.rows.length) {
-                    throw new Error(`Product "${item.item_name}" is unavailable.`);
-                }
-            }
-
             await client.query(
                 `
                 INSERT INTO sales_order_items (
-                    order_id, product_id, item_name, item_description,
-                    item_balance, uom, quantity, retail_price,
-                    discount_percent, unit_price, amount, tax_code,
-                    tax_rate, tax_amount, gross_amount, memo, line_number
+                    order_id,
+                    product_id,
+                    item_name,
+                    item_description,
+                    item_balance,
+                    uom,
+                    quantity,
+                    retail_price,
+                    discount_percent,
+                    unit_price,
+                    amount,
+                    tax_code,
+                    tax_rate,
+                    tax_amount,
+                    gross_amount,
+                    memo,
+                    line_number
                 )
                 VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9,
@@ -555,17 +692,23 @@ export async function POST(request) {
         );
     } catch (error) {
         try {
-            await client.query("ROLLBACK");
+            await client?.query("ROLLBACK");
         } catch {}
 
         if (error.code === "23505") {
             return NextResponse.json(
-                { success: false, message: "This quotation has already been converted, or the order number already exists." },
+                {
+                    success: false,
+                    message: "This quotation has already been converted, or the order number already exists.",
+                },
                 { status: 409 }
             );
         }
 
-        if (error.message === "FORBIDDEN" || error.message === "UNAUTHORIZED") {
+        if (
+            error.message === "FORBIDDEN" ||
+            error.message === "UNAUTHORIZED"
+        ) {
             return errorResponse(error);
         }
 

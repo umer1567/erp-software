@@ -4,6 +4,7 @@ import { getTenantDb } from "@/lib/db";
 import { getCompanyProfile } from "@/lib/tenant";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export const dynamic = "force-dynamic";
 
@@ -89,25 +90,23 @@ function normalizeDate(value) {
 
     const dateString = String(value).trim().slice(0, 10);
 
-    // Require YYYY-MM-DD format.
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
         return null;
     }
 
-    // Use UTC to prevent timezone-related date changes.
     const date = new Date(`${dateString}T00:00:00.000Z`);
 
     if (Number.isNaN(date.getTime())) {
         return null;
     }
 
-    // Validate the actual calendar date.
     if (date.toISOString().slice(0, 10) !== dateString) {
         return null;
     }
 
     return dateString;
 }
+
 /* -------------------------------------------------------------------------- */
 /* Normalize IDs                                                              */
 /* -------------------------------------------------------------------------- */
@@ -217,11 +216,6 @@ function normalizeSelectedItems(body) {
         seen.add(key);
     }
 
-    /*
-     * A PR item cannot be selected through both requisition workflows.
-     * Direct product IDs are independent.
-     */
-
     const requisitionSelections = selections.filter(
         (item) => item.sourceType !== SOURCE_DIRECT
     );
@@ -285,7 +279,7 @@ function getCreatedFromLabel(sourceTypes) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* GET: Load one RFQ for edit, view, and report                               */
+/* GET: Load one active RFQ for edit, view, and report                        */
 /* -------------------------------------------------------------------------- */
 
 export async function GET(request, context) {
@@ -299,21 +293,17 @@ export async function GET(request, context) {
         }
 
         const id = await getParams(context);
-
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
 
         const headerResult = await db.query(
             `
             SELECT
                 r.*
-
             FROM rfqs r
-
             WHERE
                 r.rfq_id = $1
                 AND r.company_id = $2
-
+                AND r.deleted_at IS NULL
             LIMIT 1
             `,
             [id, user.companyId]
@@ -455,7 +445,6 @@ export async function GET(request, context) {
 
         const header = headerResult.rows[0];
 
-        // Company name comes from the central database.
         const company = await getCompanyProfile(user.companyId);
         header.company_name = company?.company_name ?? null;
 
@@ -550,10 +539,6 @@ export async function PATCH(request, context) {
         const id = await getParams(context);
         const body = await request.json();
 
-        /*
-         * FIX:
-         * Accept both transactionDate and transaction_date.
-         */
         const transactionDate = normalizeDate(
             body.transactionDate ??
             body.transaction_date
@@ -592,14 +577,13 @@ export async function PATCH(request, context) {
             (item) => item.sourceType === SOURCE_DIRECT
         );
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
         client = await db.connect();
 
         await client.query("BEGIN");
         transactionStarted = true;
 
-        /* Lock RFQ and verify company ownership. */
+        /* Lock active RFQ and verify company ownership. */
         const currentResult = await client.query(
             `
             SELECT rfq_id, status
@@ -607,6 +591,7 @@ export async function PATCH(request, context) {
             WHERE
                 rfq_id = $1
                 AND company_id = $2
+                AND deleted_at IS NULL
             FOR UPDATE
             `,
             [id, user.companyId]
@@ -623,27 +608,34 @@ export async function PATCH(request, context) {
         }
 
         /* Protect existing supplier quotations. */
+                /* Protect existing supplier and purchase quotations. */
         const quotationCheck = await client.query(
             `
-            SELECT COUNT(*)::INTEGER AS quotation_count
-
-            FROM rfq_vendor_quotes q
-
-            INNER JOIN rfq_vendors v
-                ON v.rfq_vendor_id = q.rfq_vendor_id
-
-            WHERE v.rfq_id = $1
+            SELECT
+                (
+                    SELECT COUNT(*)
+                    FROM rfq_vendor_quotes q
+                    INNER JOIN rfq_vendors v
+                        ON v.rfq_vendor_id = q.rfq_vendor_id
+                    WHERE v.rfq_id = $1
+                )
+                +
+                (
+                    SELECT COUNT(*)
+                    FROM purchase_quotations pq
+                    WHERE pq.rfq_id = $1
+                ) AS quotation_count
             `,
             [id]
         );
 
         if (Number(quotationCheck.rows[0].quotation_count) > 0) {
             throw validationError(
-                "This RFQ already has supplier quotation records. Its items and invited suppliers cannot be replaced. Preserve the existing quotation records before making changes."
+                "This RFQ already has supplier quotation records or linked purchase quotations. Its items and invited suppliers cannot be replaced."
             );
         }
 
-        /* Validate suppliers. */
+        /* Validate active, non-archived suppliers. */
         const supplierResult = await client.query(
             `
             SELECT supplier_id
@@ -651,6 +643,7 @@ export async function PATCH(request, context) {
             WHERE
                 supplier_id = ANY($1::INTEGER[])
                 AND COALESCE(is_active, TRUE) = TRUE
+                AND deleted_at IS NULL
             FOR SHARE
             `,
             [supplierIds]
@@ -658,14 +651,14 @@ export async function PATCH(request, context) {
 
         if (supplierResult.rows.length !== supplierIds.length) {
             throw validationError(
-                "One or more suppliers are inactive or unavailable."
+                "One or more suppliers are inactive, archived, or unavailable."
             );
         }
 
         const sourceLines = [];
 
         /* ------------------------------------------------------------------ */
-        /* 1. Purchase Requisition items                                       */
+        /* 1. Purchase Requisition items                                      */
         /* ------------------------------------------------------------------ */
 
         if (purchaseSelections.length) {
@@ -696,10 +689,22 @@ export async function PATCH(request, context) {
                 INNER JOIN purchase_requisitions pr
                     ON pr.requisition_id = ri.requisition_id
 
+                LEFT JOIN products p
+                    ON p.product_id = ri.product_id
+
                 WHERE
                     ri.requisition_item_id = ANY($1::INTEGER[])
                     AND pr.company_id = $2
                     AND pr.status = 'APPROVED'
+                    AND pr.deleted_at IS NULL
+
+                    AND (
+                        ri.product_id IS NULL
+                        OR (
+                            p.is_active = TRUE
+                            AND p.deleted_at IS NULL
+                        )
+                    )
 
                     AND NOT EXISTS (
                         SELECT 1
@@ -741,7 +746,7 @@ export async function PATCH(request, context) {
         }
 
         /* ------------------------------------------------------------------ */
-        /* 2. Procurement Requisition items                                    */
+        /* 2. Procurement Requisition items                                   */
         /* ------------------------------------------------------------------ */
 
         if (procurementSelections.length) {
@@ -797,15 +802,28 @@ export async function PATCH(request, context) {
                     ON ori.requisition_item_id =
                         pri.source_requisition_item_id
 
+                LEFT JOIN products p
+                    ON p.product_id = pri.product_id
+
                 WHERE
                     pri.procurement_requisition_item_id =
                         ANY($1::INTEGER[])
 
                     AND pro.company_id = $2
                     AND pro.status = 'CREATED'
+                    AND pro.deleted_at IS NULL
 
                     AND pr.company_id = $2
                     AND pr.status = 'APPROVED'
+                    AND pr.deleted_at IS NULL
+
+                    AND (
+                        pri.product_id IS NULL
+                        OR (
+                            p.is_active = TRUE
+                            AND p.deleted_at IS NULL
+                        )
+                    )
 
                     AND NOT EXISTS (
                         SELECT 1
@@ -846,7 +864,7 @@ export async function PATCH(request, context) {
         }
 
         /* ------------------------------------------------------------------ */
-        /* 3. Direct Purchase products                                         */
+        /* 3. Direct Purchase products                                        */
         /* ------------------------------------------------------------------ */
 
         if (directSelections.length) {
@@ -880,6 +898,7 @@ export async function PATCH(request, context) {
                 WHERE
                     p.product_id = ANY($1::INTEGER[])
                     AND p.is_active = TRUE
+                    AND p.deleted_at IS NULL
 
                 ORDER BY p.product_id
 
@@ -890,7 +909,7 @@ export async function PATCH(request, context) {
 
             if (productResult.rows.length !== productIds.length) {
                 throw validationError(
-                    "One or more selected products are inactive or unavailable. Refresh and try again."
+                    "One or more selected products are inactive, archived, or unavailable. Refresh and try again."
                 );
             }
 
@@ -928,7 +947,7 @@ export async function PATCH(request, context) {
         }
 
         /* ------------------------------------------------------------------ */
-        /* Validate duplicate original PR items                                */
+        /* Validate duplicate original PR items                               */
         /* ------------------------------------------------------------------ */
 
         const originalSourceIds = sourceLines
@@ -970,7 +989,7 @@ export async function PATCH(request, context) {
         }
 
         /* ------------------------------------------------------------------ */
-        /* Update RFQ header                                                   */
+        /* Update RFQ header                                                  */
         /* ------------------------------------------------------------------ */
 
         await client.query(
@@ -987,6 +1006,7 @@ export async function PATCH(request, context) {
             WHERE
                 rfq_id = $6
                 AND company_id = $7
+                AND deleted_at IS NULL
             `,
             [
                 transactionDate,
@@ -1016,7 +1036,7 @@ export async function PATCH(request, context) {
         );
 
         /* ------------------------------------------------------------------ */
-        /* Replace invited suppliers                                           */
+        /* Replace invited suppliers                                          */
         /* ------------------------------------------------------------------ */
 
         await client.query(
@@ -1112,13 +1132,10 @@ export async function PATCH(request, context) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* DELETE: Delete a DRAFT RFQ                                                 */
+/* DELETE: Archive a DRAFT RFQ into the Recycle Bin                           */
 /* -------------------------------------------------------------------------- */
 
 export async function DELETE(request, context) {
-    let client;
-    let transactionStarted = false;
-
     try {
         const user = await getCurrentUser();
 
@@ -1129,103 +1146,80 @@ export async function DELETE(request, context) {
         }
 
         const id = await getParams(context);
-
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
-        client = await db.connect();
 
-        await client.query("BEGIN");
-        transactionStarted = true;
+        const result = await archiveAndSoftDelete(
+            {
+                user,
+                db,
+                companyId: user.companyId,
+            },
+            {
+                moduleKey: "rfqs",
+                recordId: id,
+                deletionReason: "RFQ archived by user",
 
-        const currentResult = await client.query(
-            `
-            SELECT rfq_id, status
-            FROM rfqs
-            WHERE
-                rfq_id = $1
-                AND company_id = $2
-            FOR UPDATE
-            `,
-            [id, user.companyId]
+                validateRecord: async (client, record) => {
+                    if (record.status !== "DRAFT") {
+                        return {
+                            status: 409,
+                            message: "Only DRAFT RFQs can be archived.",
+                        };
+                    }
+
+                                        const quotationCheck = await client.query(
+                        `
+                        SELECT
+                            (
+                                SELECT COUNT(*)
+                                FROM rfq_vendor_quotes q
+                                INNER JOIN rfq_vendors v
+                                    ON v.rfq_vendor_id = q.rfq_vendor_id
+                                WHERE v.rfq_id = $1
+                            )
+                            +
+                            (
+                                SELECT COUNT(*)
+                                FROM purchase_quotations pq
+                                WHERE pq.rfq_id = $1
+                            ) AS quotation_count
+                        `,
+                        [id]
+                    );
+
+                    if (
+                        Number(
+                            quotationCheck.rows[0].quotation_count
+                        ) > 0
+                    ) {
+                        return {
+                            status: 409,
+                            message:
+                                "This RFQ cannot be archived because supplier quotation records or linked purchase quotations already exist.",
+                        };
+                    }
+
+                    return null;
+                },
+            }
         );
 
-        if (!currentResult.rows.length) {
-            throw validationError("RFQ not found.", 404);
-        }
-
-        if (currentResult.rows[0].status !== "DRAFT") {
-            throw validationError(
-                "Only DRAFT RFQs can be deleted."
+        if (!result.success) {
+            return NextResponse.json(
+                {
+                    success: false,
+                    message: result.message,
+                },
+                { status: result.status || 400 }
             );
         }
-
-        /*
-         * Protect supplier quotation records.
-         * The RFQ must not be deleted if supplier quotes exist.
-         */
-
-        const quotationCheck = await client.query(
-            `
-            SELECT COUNT(*)::INTEGER AS quotation_count
-            FROM rfq_vendor_quotes q
-            INNER JOIN rfq_vendors v
-                ON v.rfq_vendor_id = q.rfq_vendor_id
-            WHERE v.rfq_id = $1
-            `,
-            [id]
-        );
-
-        if (Number(quotationCheck.rows[0].quotation_count) > 0) {
-            throw validationError(
-                "This RFQ cannot be deleted because supplier quotation records already exist."
-            );
-        }
-
-        /*
-         * Delete RFQ lines and invited suppliers first.
-         * This avoids relying on cascade behavior for these records.
-         */
-
-        await client.query(
-            `
-            DELETE FROM rfq_items
-            WHERE rfq_id = $1
-            `,
-            [id]
-        );
-
-        await client.query(
-            `
-            DELETE FROM rfq_vendors
-            WHERE rfq_id = $1
-            `,
-            [id]
-        );
-
-        await client.query(
-            `
-            DELETE FROM rfqs
-            WHERE
-                rfq_id = $1
-                AND company_id = $2
-            `,
-            [id, user.companyId]
-        );
-
-        await client.query("COMMIT");
-        transactionStarted = false;
 
         return NextResponse.json({
             success: true,
-            message: "RFQ deleted successfully.",
+            message: "RFQ moved to the Recycle Bin successfully.",
+            archiveId: result.archiveId,
         });
     } catch (error) {
-        if (transactionStarted && client) {
-            await client.query("ROLLBACK").catch(() => {});
-        }
-
         return apiError(error);
-    } finally {
-        client?.release();
     }
 }

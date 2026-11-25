@@ -82,6 +82,10 @@ function calculateItems(items) {
         throw new Error("Add at least one transaction line.");
     }
 
+    if (items.length > 500) {
+        throw new Error("A Delivery Challan cannot contain more than 500 lines.");
+    }
+
     let totalAmount = 0;
     let totalTax = 0;
 
@@ -113,7 +117,8 @@ function calculateItems(items) {
             !Number.isFinite(unitPrice) ||
             unitPrice < 0 ||
             !Number.isFinite(taxRate) ||
-            taxRate < 0
+            taxRate < 0 ||
+            taxRate > 100
         ) {
             throw new Error(
                 `Enter a valid quantity, unit price, and tax rate on line ${index + 1}.`
@@ -177,111 +182,139 @@ export async function GET() {
     try {
         const context = await getContext();
         await checkPermission(context, "view");
+
         const db = await getOperationalPool(context.companyId);
 
         const [
-    challansResult,
-    customersResult,
-    warehousesResult,
-    companyResult,
-    productsResult,
-] = await Promise.all([
-                db.query(
-                    `
-                    SELECT
-                        dc.delivery_challan_id,
-                        dc.transaction_number,
-                        dc.transaction_date,
-                        dc.customer_id,
-                        dc.warehouse_id,
-                        dc.source_order_id,
-                        dc.status,
-                        dc.document_status,
-                        dc.subsidiary_name,
-                        dc.department,
-                        dc.challan_class,
-                        dc.driver_name,
-                        dc.driver_mobile_no,
-                        dc.vehicle_no,
-                        dc.project,
-                        dc.reference_no,
-                        dc.memo,
-                        dc.currency,
-                        dc.exchange_rate,
-                        dc.total_amount,
-                        dc.tax_amount,
-                        dc.gross_amount,
-                        dc.created_at,
-                        dc.updated_at,
-                        c.customer_name,
-                        c.customer_code,
-                        w.warehouse_name,
-                        so.order_number AS source_order_number
-                    FROM delivery_challans dc
-                    LEFT JOIN customers c
-                        ON c.customer_id = dc.customer_id
-                    LEFT JOIN warehouses w
-                        ON w.warehouse_id = dc.warehouse_id
-                    LEFT JOIN sales_orders so
-                        ON so.order_id = dc.source_order_id
-                    WHERE dc.company_id = $1
-                    ORDER BY dc.transaction_date DESC,
-                             dc.delivery_challan_id DESC
-                    `,
-                    [context.companyId]
-                ),
-                db.query(
-                    `
-                    SELECT customer_id, customer_code, customer_name,
-                           phone, email, address, credit_limit, opening_balance
-                    FROM customers
-                    WHERE is_active = TRUE
-                    ORDER BY customer_name
-                    `
-                ),
-                db.query(
-                    `
-                    SELECT warehouse_id, warehouse_code, warehouse_name, location
-                    FROM warehouses
-                    WHERE is_active = TRUE
-                    ORDER BY warehouse_name
-                    `
-                ),
-                pool.query(
-                    `
-                    SELECT company_id, company_name, currency, address,
-                           phone, email, logo_url
-                    FROM companies
-                    WHERE company_id = $1
-                    `,
-                    [context.companyId]
-                ),
+            challansResult,
+            customersResult,
+            warehousesResult,
+            companyResult,
+            productsResult,
+        ] = await Promise.all([
+            db.query(
+                `
+                SELECT
+                    dc.delivery_challan_id,
+                    dc.transaction_number,
+                    dc.transaction_date,
+                    dc.customer_id,
+                    dc.warehouse_id,
+                    dc.source_order_id,
+                    dc.status,
+                    dc.document_status,
+                    dc.subsidiary_name,
+                    dc.department,
+                    dc.challan_class,
+                    dc.driver_name,
+                    dc.driver_mobile_no,
+                    dc.vehicle_no,
+                    dc.project,
+                    dc.reference_no,
+                    dc.memo,
+                    dc.currency,
+                    dc.exchange_rate,
+                    dc.total_amount,
+                    dc.tax_amount,
+                    dc.gross_amount,
+                    dc.created_at,
+                    dc.updated_at,
+                    c.customer_name,
+                    c.customer_code,
+                    w.warehouse_name,
+                    so.order_number AS source_order_number
+                FROM delivery_challans dc
+                LEFT JOIN customers c
+                    ON c.customer_id = dc.customer_id
+                   AND c.deleted_at IS NULL
+                LEFT JOIN warehouses w
+                    ON w.warehouse_id = dc.warehouse_id
+                   AND w.deleted_at IS NULL
+                LEFT JOIN sales_orders so
+                    ON so.order_id = dc.source_order_id
+                   AND so.company_id = dc.company_id
+                   AND so.deleted_at IS NULL
+                WHERE dc.company_id = $1
+                  AND dc.deleted_at IS NULL
+                ORDER BY dc.transaction_date DESC,
+                         dc.delivery_challan_id DESC
+                `,
+                [context.companyId]
+            ),
 
-                db.query(
-    `
-    SELECT
-        product_id,
-        sku,
-        product_name,
-        description,
-        sales_unit,
-        unit,
-        sale_price
-    FROM products
-    WHERE is_active = TRUE
-    ORDER BY product_name
-    `
-),
+            db.query(
+                `
+                SELECT
+                    customer_id,
+                    customer_code,
+                    customer_name,
+                    phone,
+                    email,
+                    address,
+                    credit_limit,
+                    opening_balance
+                FROM customers
+                WHERE is_active = TRUE
+                  AND deleted_at IS NULL
+                ORDER BY customer_name
+                `
+            ),
 
-            ]);
+            db.query(
+                `
+                SELECT
+                    warehouse_id,
+                    warehouse_code,
+                    warehouse_name,
+                    location
+                FROM warehouses
+                WHERE is_active = TRUE
+                  AND deleted_at IS NULL
+                ORDER BY warehouse_name
+                `
+            ),
+
+            pool.query(
+                `
+                SELECT
+                    company_id,
+                    company_name,
+                    currency,
+                    address,
+                    phone,
+                    email,
+                    logo_url
+                FROM companies
+                WHERE company_id = $1
+                `,
+                [context.companyId]
+            ),
+
+            db.query(
+                `
+                SELECT
+                    product_id,
+                    sku,
+                    product_name,
+                    description,
+                    sales_unit,
+                    unit,
+                    sale_price
+                FROM products
+                WHERE is_active = TRUE
+                  AND deleted_at IS NULL
+                ORDER BY product_name
+                `
+            ),
+        ]);
 
         return NextResponse.json({
-    success: true,
-    challans: challansResult.rows,
-    customers: customersResult.rows,
-    warehouses: warehousesResult.rows,
-    products: productsResult.rows,
-    company: companyResult.rows[0] || null,
+            success: true,
+            challans: challansResult.rows,
+            customers: customersResult.rows,
+            warehouses: warehousesResult.rows,
+            products: productsResult.rows,
+            company: companyResult.rows[0] || null,
             permissions: {
                 canView: true,
                 canCreate: await hasPermission(
@@ -313,6 +346,7 @@ export async function POST(request) {
     try {
         const context = await getContext();
         await checkPermission(context, "create");
+
         const db = await getOperationalPool(context.companyId);
         client = await db.connect();
 
@@ -321,9 +355,9 @@ export async function POST(request) {
 
         const customerId = Number(body.customer_id);
         const warehouseId = Number(body.warehouse_id);
+
         const sourceOrderId =
-            body.source_order_id === "" ||
-            body.source_order_id == null
+            body.source_order_id === "" || body.source_order_id == null
                 ? null
                 : Number(body.source_order_id);
 
@@ -369,9 +403,20 @@ export async function POST(request) {
         }
 
         const companyResult = await pool.query(
-            `SELECT currency, company_name FROM companies WHERE company_id = $1`,
+            `
+            SELECT currency, company_name
+            FROM companies
+            WHERE company_id = $1
+            `,
             [context.companyId]
         );
+
+        if (!companyResult.rows.length) {
+            return NextResponse.json(
+                { success: false, message: "Company information was not found." },
+                { status: 404 }
+            );
+        }
 
         await client.query("BEGIN");
 
@@ -379,7 +424,10 @@ export async function POST(request) {
             `
             SELECT customer_id
             FROM customers
-            WHERE customer_id = $1 AND is_active = TRUE
+            WHERE customer_id = $1
+              AND is_active = TRUE
+              AND deleted_at IS NULL
+            FOR SHARE
             `,
             [customerId]
         );
@@ -388,7 +436,10 @@ export async function POST(request) {
             `
             SELECT warehouse_id
             FROM warehouses
-            WHERE warehouse_id = $1 AND is_active = TRUE
+            WHERE warehouse_id = $1
+              AND is_active = TRUE
+              AND deleted_at IS NULL
+            FOR SHARE
             `,
             [warehouseId]
         );
@@ -405,17 +456,43 @@ export async function POST(request) {
             );
         }
 
+        // Validate selected products. Free-text lines without product_id remain allowed.
+        for (const item of calculated.items) {
+            if (item.product_id === null) continue;
+
+            const productResult = await client.query(
+                `
+                SELECT product_id
+                FROM products
+                WHERE product_id = $1
+                  AND is_active = TRUE
+                  AND deleted_at IS NULL
+                FOR SHARE
+                `,
+                [item.product_id]
+            );
+
+            if (!productResult.rows.length) {
+                throw new Error(`Product "${item.item_name}" is unavailable or archived.`);
+            }
+        }
+
         let sourceOrder = null;
 
         if (sourceOrderId !== null) {
-            // Lock the order header so two concurrent requests cannot
-            // deliver the same remaining quantity.
             const orderResult = await client.query(
                 `
-                SELECT order_id, customer_id, warehouse_id, order_number,
-                       status, document_status
+                SELECT
+                    order_id,
+                    customer_id,
+                    warehouse_id,
+                    order_number,
+                    status,
+                    document_status
                 FROM sales_orders
-                WHERE order_id = $1 AND company_id = $2
+                WHERE order_id = $1
+                  AND company_id = $2
+                  AND deleted_at IS NULL
                 FOR UPDATE
                 `,
                 [sourceOrderId, context.companyId]
@@ -491,10 +568,18 @@ export async function POST(request) {
 
                 const orderLineResult = await client.query(
                     `
-                    SELECT order_item_id, order_id, product_id, item_name,
-                           item_description, item_balance, uom, quantity
+                    SELECT
+                        order_item_id,
+                        order_id,
+                        product_id,
+                        item_name,
+                        item_description,
+                        item_balance,
+                        uom,
+                        quantity
                     FROM sales_order_items
-                    WHERE order_item_id = $1 AND order_id = $2
+                    WHERE order_item_id = $1
+                      AND order_id = $2
                     FOR UPDATE
                     `,
                     [item.source_order_item_id, sourceOrderId]
@@ -538,7 +623,8 @@ export async function POST(request) {
                       ON dc.delivery_challan_id = dci.delivery_challan_id
                     WHERE dci.source_order_item_id = $1
                       AND dc.company_id = $2
-                      AND dc.status <> 'VOID'
+                      AND dc.deleted_at IS NULL
+                      AND UPPER(dc.status) <> 'VOID'
                     `,
                     [item.source_order_item_id, context.companyId]
                 );
@@ -547,12 +633,13 @@ export async function POST(request) {
                 const previouslyDelivered = Number(
                     deliveredResult.rows[0].delivered_quantity || 0
                 );
+
                 const pendingQuantity = Math.max(
                     0,
                     orderedQuantity - previouslyDelivered
                 );
 
-                if (item.quantity > pendingQuantity + 1) {
+                if (item.quantity > pendingQuantity + 0.000001) {
                     await client.query("ROLLBACK");
 
                     return NextResponse.json(
@@ -566,8 +653,7 @@ export async function POST(request) {
                     );
                 }
 
-                // Use the authoritative Sales Order line values for
-                // product identity and descriptive fields.
+                // Use authoritative Sales Order line details.
                 item.product_id = orderLine.product_id;
                 item.item_name = orderLine.item_name;
                 item.item_description = orderLine.item_description;
@@ -617,9 +703,7 @@ export async function POST(request) {
             `
         );
 
-        const challanId = Number(
-            sequenceResult.rows[0].delivery_challan_id
-        );
+        const challanId = Number(sequenceResult.rows[0].delivery_challan_id);
         const transactionNumber = `DC-${String(challanId).padStart(6, "0")}`;
 
         const insertResult = await client.query(
@@ -748,13 +832,16 @@ export async function POST(request) {
                         ON dc.delivery_challan_id = dci.delivery_challan_id
                       WHERE dci.source_order_item_id = soi.order_item_id
                         AND dc.company_id = $2
-                        AND dc.status <> 'VOID'
+                        AND dc.deleted_at IS NULL
+                        AND UPPER(dc.status) <> 'VOID'
                   )
                 `,
                 [sourceOrderId, context.companyId]
             );
 
-            const pendingLines = Number(pendingResult.rows[0].pending_lines || 0);
+            const pendingLines = Number(
+                pendingResult.rows[0].pending_lines || 0
+            );
 
             await client.query(
                 `
@@ -762,7 +849,9 @@ export async function POST(request) {
                 SET document_status = $1,
                     updated_by = $2,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE order_id = $3 AND company_id = $4
+                WHERE order_id = $3
+                  AND company_id = $4
+                  AND deleted_at IS NULL
                 `,
                 [
                     pendingLines === 0
@@ -787,22 +876,28 @@ export async function POST(request) {
         );
     } catch (error) {
         try {
-            await client.query("ROLLBACK");
+            await client?.query("ROLLBACK");
         } catch {}
 
-        if (error.message === "UNAUTHORIZED" || error.message === "FORBIDDEN") {
+        if (
+            error.message === "UNAUTHORIZED" ||
+            error.message === "FORBIDDEN"
+        ) {
             return errorResponse(error);
         }
 
-        if (
-            error.message?.startsWith("Add at least") ||
-            error.message?.startsWith("Enter an item") ||
-            error.message?.startsWith("Enter a valid") ||
-            error.message?.startsWith("Invalid") ||
-            error.message?.startsWith("Every line") ||
-            error.message?.startsWith("Source order") ||
-            error.message?.startsWith("Product mismatch")
-        ) {
+        const clientErrors = [
+            "Add at least",
+            "Enter an item",
+            "Enter a valid",
+            "Invalid",
+            "Every line",
+            "Source order",
+            "Product mismatch",
+            "Product ",
+        ];
+
+        if (clientErrors.some((message) => error.message?.startsWith(message))) {
             return NextResponse.json(
                 { success: false, message: error.message },
                 { status: 400 }

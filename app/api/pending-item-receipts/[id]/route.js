@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
@@ -20,14 +21,18 @@ function positiveId(value, fieldName) {
     return number;
 }
 
-function validationError(message) {
+function validationError(message, status = 400) {
     const error = new Error(message);
-    error.status = 400;
+    error.status = status;
     return error;
 }
 
 function validDate(value, fieldName, required = false) {
-    if (!value) {
+    if (
+        value === null ||
+        value === undefined ||
+        String(value).trim() === ""
+    ) {
         if (required) {
             throw validationError(`${fieldName} is required.`);
         }
@@ -35,22 +40,34 @@ function validDate(value, fieldName, required = false) {
         return null;
     }
 
-    const date = String(value);
+    const date = String(value).trim();
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
         throw validationError(`Invalid ${fieldName}.`);
     }
 
-    const parsed = new Date(`${date}T00:00:00`);
+    const [year, month, day] = date.split("-").map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
 
     if (
-        Number.isNaN(parsed.getTime()) ||
-        parsed.toISOString().slice(0, 10) !== date
+        parsed.getUTCFullYear() !== year ||
+        parsed.getUTCMonth() !== month - 1 ||
+        parsed.getUTCDate() !== day
     ) {
         throw validationError(`Invalid ${fieldName}.`);
     }
 
     return date;
+}
+
+function dateToInputValue(value) {
+    if (!value) return null;
+
+    if (value instanceof Date) {
+        return value.toISOString().slice(0, 10);
+    }
+
+    return String(value).slice(0, 10);
 }
 
 function validQuantity(value) {
@@ -80,7 +97,7 @@ function apiError(error) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* GET: Get one pending item receipt                                           */
+/* GET: Get one active pending item receipt                                   */
 /* -------------------------------------------------------------------------- */
 
 export async function GET(request, { params }) {
@@ -100,10 +117,13 @@ export async function GET(request, { params }) {
             "view"
         );
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
 
-        const companyId = positiveId(user.companyId, "company");
+        const companyId = positiveId(
+            user.companyId || user.company_id,
+            "company"
+        );
+
         const { id } = await params;
         const receiptId = positiveId(id, "receipt ID");
 
@@ -120,11 +140,13 @@ export async function GET(request, { params }) {
             FROM pending_item_receipts pir
             LEFT JOIN suppliers s
                 ON s.supplier_id = pir.supplier_id
+                AND s.company_id = pir.company_id
             LEFT JOIN purchase_orders po
                 ON po.purchase_order_id = pir.purchase_order_id
                 AND po.company_id = pir.company_id
             WHERE pir.pending_item_receipt_id = $1
               AND pir.company_id = $2
+              AND pir.deleted_at IS NULL
             `,
             [receiptId, companyId]
         );
@@ -175,7 +197,7 @@ export async function GET(request, { params }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* PATCH: Update pending item receipt                                          */
+/* PATCH: Update pending item receipt                                         */
 /* -------------------------------------------------------------------------- */
 
 export async function PATCH(request, { params }) {
@@ -197,15 +219,20 @@ export async function PATCH(request, { params }) {
             "update"
         );
 
-        const companyId = positiveId(user.companyId, "company");
-        const userId = positiveId(user.userId, "user");
+        const companyId = positiveId(
+            user.companyId || user.company_id,
+            "company"
+        );
+
+        const userId = positiveId(
+            user.userId || user.user_id,
+            "user"
+        );
 
         const { id } = await params;
         const receiptId = positiveId(id, "receipt ID");
-
         const body = await request.json();
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
         client = await db.connect();
 
@@ -217,15 +244,16 @@ export async function PATCH(request, { params }) {
             FROM pending_item_receipts
             WHERE pending_item_receipt_id = $1
               AND company_id = $2
+              AND deleted_at IS NULL
             FOR UPDATE
             `,
             [receiptId, companyId]
         );
 
         if (existingResult.rowCount === 0) {
-            throw Object.assign(
-                new Error("Pending Item Receipt not found."),
-                { status: 404 }
+            throw validationError(
+                "Pending Item Receipt not found.",
+                404
             );
         }
 
@@ -234,6 +262,28 @@ export async function PATCH(request, { params }) {
         if (existing.status === "CANCELLED") {
             throw validationError(
                 "A cancelled Pending Item Receipt cannot be edited."
+            );
+        }
+
+        /*
+         * Once an Item Receipt is created from this Pending Item Receipt,
+         * its source document and child lines must remain unchanged.
+         */
+        const linkedReceiptResult = await client.query(
+            `
+            SELECT item_receipt_id
+            FROM item_receipts
+            WHERE pending_item_receipt_id = $1
+              AND company_id = $2
+            LIMIT 1
+            `,
+            [receiptId, companyId]
+        );
+
+        if (linkedReceiptResult.rowCount > 0) {
+            throw validationError(
+                "This Pending Item Receipt cannot be edited because an Item Receipt is already linked to it.",
+                409
             );
         }
 
@@ -246,19 +296,16 @@ export async function PATCH(request, { params }) {
         }
 
         const documentDate = validDate(
-            body.documentDate || existing.document_date.toISOString?.().slice(0, 10) ||
-                String(existing.document_date).slice(0, 10),
+            body.documentDate === undefined
+                ? dateToInputValue(existing.document_date)
+                : body.documentDate,
             "Document date",
             true
         );
 
         const expectedReceiptDate = validDate(
             body.expectedReceiptDate === undefined
-                ? (
-                    existing.expected_receipt_date
-                        ? String(existing.expected_receipt_date).slice(0, 10)
-                        : null
-                )
+                ? dateToInputValue(existing.expected_receipt_date)
                 : body.expectedReceiptDate,
             "Expected receipt date"
         );
@@ -288,20 +335,28 @@ export async function PATCH(request, { params }) {
             const poResult = await client.query(
                 `
                 SELECT
-                    purchase_order_id,
-                    supplier_id,
-                    status,
-                    expected_delivery_date
-                FROM purchase_orders
-                WHERE purchase_order_id = $1
-                  AND company_id = $2
-                FOR UPDATE
+                    po.purchase_order_id,
+                    po.supplier_id,
+                    po.status,
+                    po.expected_delivery_date
+                FROM purchase_orders po
+                INNER JOIN suppliers s
+                    ON s.supplier_id = po.supplier_id
+                    AND s.company_id = po.company_id
+                WHERE po.purchase_order_id = $1
+                  AND po.company_id = $2
+                  AND po.deleted_at IS NULL
+                  AND COALESCE(s.is_active, TRUE) = TRUE
+                  AND s.deleted_at IS NULL
+                FOR UPDATE OF po
                 `,
                 [purchaseOrderId, companyId]
             );
 
             if (poResult.rowCount === 0) {
-                throw validationError("Purchase Order not found.");
+                throw validationError(
+                    "Purchase Order not found, archived, or its supplier is inactive."
+                );
             }
 
             const purchaseOrder = poResult.rows[0];
@@ -441,14 +496,16 @@ export async function PATCH(request, { params }) {
                 SELECT supplier_id
                 FROM suppliers
                 WHERE supplier_id = $1
+                  AND company_id = $2
                   AND COALESCE(is_active, TRUE) = TRUE
+                  AND deleted_at IS NULL
                 `,
-                [supplierId]
+                [supplierId, companyId]
             );
 
             if (supplierResult.rowCount === 0) {
                 throw validationError(
-                    "Supplier not found or inactive."
+                    "Supplier not found, archived, or inactive."
                 );
             }
 
@@ -525,13 +582,15 @@ export async function PATCH(request, { params }) {
                     SELECT product_id
                     FROM products
                     WHERE product_id = ANY($1::INTEGER[])
+                      AND COALESCE(is_active, TRUE) = TRUE
+                      AND deleted_at IS NULL
                     `,
                     [productIds]
                 );
 
                 if (productResult.rowCount !== productIds.length) {
                     throw validationError(
-                        "One or more selected products do not exist."
+                        "One or more selected products do not exist, are archived, or are inactive."
                     );
                 }
             }
@@ -556,6 +615,7 @@ export async function PATCH(request, { params }) {
                 updated_at = CURRENT_TIMESTAMP
             WHERE pending_item_receipt_id = $9
               AND company_id = $10
+              AND deleted_at IS NULL
             RETURNING *
             `,
             [
@@ -574,48 +634,22 @@ export async function PATCH(request, { params }) {
             ]
         );
 
-        /* ------------------------------------------------------------------ */
-        /* Replace receipt items                                               */
-        /* ------------------------------------------------------------------ */
-
-        if (body.items !== undefined) {
-            await client.query(
-                `
-                DELETE FROM pending_item_receipt_items
-                WHERE pending_item_receipt_id = $1
-                `,
-                [receiptId]
+        if (updateResult.rowCount === 0) {
+            throw validationError(
+                "Pending Item Receipt was not found or is archived.",
+                404
             );
-
-            for (const item of items) {
-                await client.query(
-                    `
-                    INSERT INTO pending_item_receipt_items (
-                        pending_item_receipt_id,
-                        purchase_order_item_id,
-                        product_id,
-                        item_description,
-                        uom,
-                        quantity_expected,
-                        remarks
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    `,
-                    [
-                        receiptId,
-                        item.purchaseOrderItemId,
-                        item.productId,
-                        item.description,
-                        item.uom,
-                        item.quantity,
-                        item.remarks,
-                    ]
-                );
-            }
         }
 
-        // If the source type changed, rebuild the items using the new source.
-        if (sourceType !== existing.source_type && body.items === undefined) {
+        /* ------------------------------------------------------------------ */
+        /* Replace receipt items when requested or source changes             */
+        /* ------------------------------------------------------------------ */
+
+        const shouldReplaceItems =
+            body.items !== undefined ||
+            sourceType !== existing.source_type;
+
+        if (shouldReplaceItems) {
             await client.query(
                 `
                 DELETE FROM pending_item_receipt_items
@@ -670,12 +704,10 @@ export async function PATCH(request, { params }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* DELETE: Delete pending item receipt                                         */
+/* DELETE: Archive pending item receipt                                       */
 /* -------------------------------------------------------------------------- */
 
 export async function DELETE(request, { params }) {
-    let client;
-
     try {
         const user = await getCurrentUser();
 
@@ -692,66 +724,77 @@ export async function DELETE(request, { params }) {
             "delete"
         );
 
-        const companyId = positiveId(user.companyId, "company");
+        const companyId = positiveId(
+            user.companyId || user.company_id,
+            "company"
+        );
+
         const { id } = await params;
         const receiptId = positiveId(id, "receipt ID");
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
-        client = await db.connect();
 
-        await client.query("BEGIN");
+        const result = await archiveAndSoftDelete(
+            { user, db, companyId },
+            {
+                moduleKey: "pending_item_receipts",
+                recordId: receiptId,
+                deletionReason:
+                    "Pending Item Receipt archived by user",
 
-        const existingResult = await client.query(
-            `
-            SELECT
-                pending_item_receipt_id,
-                receipt_number,
-                status
-            FROM pending_item_receipts
-            WHERE pending_item_receipt_id = $1
-              AND company_id = $2
-            FOR UPDATE
-            `,
-            [receiptId, companyId]
+                validateRecord: async (client, record) => {
+                    if (record.status === "CANCELLED") {
+                        return {
+                            status: 409,
+                            message:
+                                "This Pending Item Receipt is already cancelled and cannot be archived.",
+                        };
+                    }
+
+                    const linkedReceiptResult = await client.query(
+                        `
+                        SELECT item_receipt_id
+                        FROM item_receipts
+                        WHERE pending_item_receipt_id = $1
+                          AND company_id = $2
+                        LIMIT 1
+                        `,
+                        [receiptId, companyId]
+                    );
+
+                    if (linkedReceiptResult.rowCount > 0) {
+                        return {
+                            status: 409,
+                            message:
+                                "This Pending Item Receipt cannot be archived because an Item Receipt is linked to it. Preserve the receiving history.",
+                        };
+                    }
+
+                    return null;
+                },
+            }
         );
 
-        if (existingResult.rowCount === 0) {
-            throw Object.assign(
-                new Error("Pending Item Receipt not found."),
-                { status: 404 }
+        if (!result.success) {
+            return NextResponse.json(
+                {
+                    success: false,
+                    message:
+                        result.message ||
+                        "Unable to archive Pending Item Receipt.",
+                },
+                { status: result.status || 400 }
             );
         }
-
-        const receipt = existingResult.rows[0];
-
-        if (receipt.status === "CANCELLED") {
-            throw validationError(
-                "This Pending Item Receipt is already cancelled."
-            );
-        }
-
-        await client.query(
-            `
-            DELETE FROM pending_item_receipts
-            WHERE pending_item_receipt_id = $1
-              AND company_id = $2
-            `,
-            [receiptId, companyId]
-        );
-
-        // Child items are deleted automatically through ON DELETE CASCADE.
-
-        await client.query("COMMIT");
 
         return NextResponse.json({
             success: true,
-            message: `Pending Item Receipt ${receipt.receipt_number} deleted successfully.`,
+            message:
+                "Pending Item Receipt moved to Recycle Bin successfully.",
+            archiveId: result.archiveId,
+            receipt: result.record,
         });
     } catch (error) {
-        await client?.query("ROLLBACK").catch(() => {});
         return apiError(error);
-    } finally {
-        client?.release();
     }
 }

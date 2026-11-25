@@ -193,7 +193,7 @@ async function getItemBalance(client, {
 }
 
 /* =========================================================
-   GET: ASSEMBLY BUILD HISTORY
+   GET: ACTIVE ASSEMBLY BUILD HISTORY
 ========================================================= */
 
 export async function GET(request) {
@@ -219,7 +219,11 @@ export async function GET(request) {
         ).trim().toUpperCase();
 
         const values = [companyId];
-        const conditions = ["ab.company_id = $1"];
+
+        const conditions = [
+            "ab.company_id = $1",
+            "ab.deleted_at IS NULL",
+        ];
 
         if (search) {
             values.push(`%${search}%`);
@@ -388,7 +392,6 @@ export async function POST(request) {
         }
 
         const db = await getTenantDb(user);
-
         client = await db.connect();
 
         await client.query("BEGIN");
@@ -409,7 +412,7 @@ export async function POST(request) {
             [companyId]
         );
 
-        /* Validate warehouse */
+        /* Validate active production location */
 
         const warehouseResult = await client.query(
             `
@@ -417,6 +420,7 @@ export async function POST(request) {
             FROM warehouses
             WHERE warehouse_id = $1
               AND is_active = TRUE
+              AND deleted_at IS NULL
             LIMIT 1
             `,
             [warehouseId]
@@ -424,11 +428,11 @@ export async function POST(request) {
 
         if (!warehouseResult.rows.length) {
             throw new Error(
-                "Selected production location is invalid or inactive."
+                "Selected production location is invalid, inactive, or archived."
             );
         }
 
-        /* Validate customer */
+        /* Validate active customer */
 
         if (customerId) {
             const customerResult = await client.query(
@@ -437,6 +441,7 @@ export async function POST(request) {
                 FROM customers
                 WHERE customer_id = $1
                   AND is_active = TRUE
+                  AND deleted_at IS NULL
                 LIMIT 1
                 `,
                 [customerId]
@@ -444,12 +449,12 @@ export async function POST(request) {
 
             if (!customerResult.rows.length) {
                 throw new Error(
-                    "Selected customer is invalid or inactive."
+                    "Selected customer is invalid, inactive, or archived."
                 );
             }
         }
 
-        /* Validate company-owned BOM and active revision */
+        /* Validate company-owned active BOM and revision */
 
         const bomResult = await client.query(
             `
@@ -467,6 +472,7 @@ export async function POST(request) {
                 ON br.bom_id = b.bom_id
             WHERE b.bom_id = $1
               AND b.company_id = $2
+              AND b.deleted_at IS NULL
               AND br.revision_id = $3
               AND br.is_active = TRUE
             LIMIT 1
@@ -476,7 +482,7 @@ export async function POST(request) {
 
         if (!bomResult.rows.length) {
             throw new Error(
-                "Selected BOM or revision does not exist, is inactive, or does not belong to your company."
+                "Selected BOM or revision does not exist, is inactive, archived, or does not belong to your company."
             );
         }
 
@@ -495,6 +501,28 @@ export async function POST(request) {
             assemblySubProductId
         );
 
+        /* Validate the finished assembly product if applicable */
+
+        if (assemblyProductId) {
+            const assemblyProductResult = await client.query(
+                `
+                SELECT product_id
+                FROM products
+                WHERE product_id = $1
+                  AND COALESCE(is_active, TRUE) = TRUE
+                  AND deleted_at IS NULL
+                LIMIT 1
+                `,
+                [assemblyProductId]
+            );
+
+            if (!assemblyProductResult.rows.length) {
+                throw new Error(
+                    "The BOM finished product is inactive, archived, or unavailable."
+                );
+            }
+        }
+
         /* Load actual BOM revision components */
 
         const bomComponentsResult = await client.query(
@@ -510,6 +538,8 @@ export async function POST(request) {
                 bc.item_source,
                 p.product_name,
                 p.sku AS product_sku,
+                p.is_active AS product_is_active,
+                p.deleted_at AS product_deleted_at,
                 sp.sub_product_name,
                 sp.sku AS sub_product_sku
             FROM bom_revision_components bc
@@ -586,8 +616,7 @@ export async function POST(request) {
                     Number(bomComponent.bom_quantity) * buildQuantity;
 
                 if (
-                    Math.abs(requiredQuantity - expectedQuantity) >
-                    1
+                    Math.abs(requiredQuantity - expectedQuantity) > 1
                 ) {
                     throw new Error(
                         `Required quantity for component ${componentId} does not match its BOM quantity. Expected ${expectedQuantity}.`
@@ -604,6 +633,25 @@ export async function POST(request) {
                 : null;
 
             validateItemIdentity(productId, subProductId);
+
+            if (
+                productId &&
+                (
+                    !bomComponent.product_name ||
+                    bomComponent.product_is_active === false ||
+                    bomComponent.product_deleted_at
+                )
+            ) {
+                throw new Error(
+                    `The product for BOM component ${componentId} is missing, inactive, or archived.`
+                );
+            }
+
+            if (subProductId && !bomComponent.sub_product_name) {
+                throw new Error(
+                    `The sub-product for BOM component ${componentId} could not be found.`
+                );
+            }
 
             const itemBalance = await getItemBalance(client, {
                 companyId,
@@ -685,6 +733,8 @@ export async function POST(request) {
                     SELECT product_name
                     FROM products
                     WHERE product_id = $1
+                      AND COALESCE(is_active, TRUE) = TRUE
+                      AND deleted_at IS NULL
                     LIMIT 1
                     `,
                     [productId]
@@ -692,7 +742,7 @@ export async function POST(request) {
 
                 if (!itemResult.rows.length) {
                     throw new Error(
-                        "A selected byproduct product does not exist."
+                        "A selected byproduct product does not exist, is inactive, or is archived."
                     );
                 }
 
@@ -787,7 +837,6 @@ export async function POST(request) {
         /*
          * Create the document as DRAFT.
          *
-         * IMPORTANT:
          * No stock update.
          * No inventory transaction.
          * No journal entry.

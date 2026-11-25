@@ -12,7 +12,9 @@ function positiveId(value, fieldName) {
     const number = Number(value);
 
     if (!Number.isInteger(number) || number <= 0) {
-        throw new Error(`Invalid ${fieldName}.`);
+        const error = new Error(`Invalid ${fieldName}.`);
+        error.status = 400;
+        throw error;
     }
 
     return number;
@@ -35,7 +37,6 @@ function validDate(value, fieldName, required = false) {
 
     const date = String(value).trim();
 
-    // Require YYYY-MM-DD
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
         const error = new Error(
             `Invalid ${fieldName}. Expected format: YYYY-MM-DD.`
@@ -44,12 +45,8 @@ function validDate(value, fieldName, required = false) {
         throw error;
     }
 
-    // Validate using UTC to avoid timezone conversion problems.
     const [year, month, day] = date.split("-").map(Number);
-
-    const parsed = new Date(
-        Date.UTC(year, month - 1, day)
-    );
+    const parsed = new Date(Date.UTC(year, month - 1, day));
 
     if (
         parsed.getUTCFullYear() !== year ||
@@ -68,7 +65,11 @@ function validQuantity(value) {
     const quantity = Number(value);
 
     if (!Number.isFinite(quantity) || quantity <= 0) {
-        throw new Error("Item quantity must be greater than zero.");
+        const error = new Error(
+            "Item quantity must be greater than zero."
+        );
+        error.status = 400;
+        throw error;
     }
 
     return quantity;
@@ -88,14 +89,14 @@ function apiError(error) {
     );
 }
 
-function validationError(message) {
+function validationError(message, status = 400) {
     const error = new Error(message);
-    error.status = 400;
+    error.status = status;
     return error;
 }
 
 /* -------------------------------------------------------------------------- */
-/* GET: List pending receipts and dropdown data                               */
+/* GET: List active pending receipts and dropdown data                        */
 /* -------------------------------------------------------------------------- */
 
 export async function GET() {
@@ -115,10 +116,12 @@ export async function GET() {
             "view"
         );
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
 
-        const companyId = positiveId(user.companyId, "company");
+        const companyId = positiveId(
+            user.companyId || user.company_id,
+            "company"
+        );
 
         const [
             receiptsResult,
@@ -126,6 +129,10 @@ export async function GET() {
             purchaseOrdersResult,
             productsResult,
         ] = await Promise.all([
+            /* -------------------------------------------------------------- */
+            /* Pending Item Receipt history                                   */
+            /* -------------------------------------------------------------- */
+
             db.query(
                 `
                 SELECT
@@ -138,6 +145,7 @@ export async function GET() {
                 FROM pending_item_receipts pir
                 LEFT JOIN suppliers s
                     ON s.supplier_id = pir.supplier_id
+                    AND s.company_id = pir.company_id
                 LEFT JOIN purchase_orders po
                     ON po.purchase_order_id = pir.purchase_order_id
                     AND po.company_id = pir.company_id
@@ -145,6 +153,7 @@ export async function GET() {
                     ON piri.pending_item_receipt_id =
                        pir.pending_item_receipt_id
                 WHERE pir.company_id = $1
+                  AND pir.deleted_at IS NULL
                 GROUP BY
                     pir.pending_item_receipt_id,
                     s.supplier_code,
@@ -157,6 +166,10 @@ export async function GET() {
                 [companyId]
             ),
 
+            /* -------------------------------------------------------------- */
+            /* Active suppliers only                                          */
+            /* -------------------------------------------------------------- */
+
             db.query(
                 `
                 SELECT
@@ -167,9 +180,14 @@ export async function GET() {
                     email
                 FROM suppliers
                 WHERE COALESCE(is_active, TRUE) = TRUE
+                  AND deleted_at IS NULL
                 ORDER BY supplier_name
                 `
             ),
+
+            /* -------------------------------------------------------------- */
+            /* Active approved Purchase Orders only                           */
+            /* -------------------------------------------------------------- */
 
             db.query(
                 `
@@ -183,14 +201,22 @@ export async function GET() {
                     po.currency_code,
                     s.supplier_name
                 FROM purchase_orders po
-                LEFT JOIN suppliers s
+                INNER JOIN suppliers s
                     ON s.supplier_id = po.supplier_id
+                    AND s.company_id = po.company_id
                 WHERE po.company_id = $1
                   AND po.status = 'APPROVED'
+                  AND po.deleted_at IS NULL
+                  AND COALESCE(s.is_active, TRUE) = TRUE
+                  AND s.deleted_at IS NULL
                 ORDER BY po.purchase_order_id DESC
                 `,
                 [companyId]
             ),
+
+            /* -------------------------------------------------------------- */
+            /* Active products only                                           */
+            /* -------------------------------------------------------------- */
 
             db.query(
                 `
@@ -202,6 +228,7 @@ export async function GET() {
                     unit
                 FROM products
                 WHERE COALESCE(is_active, TRUE) = TRUE
+                  AND deleted_at IS NULL
                 ORDER BY product_name
                 `
             ),
@@ -242,8 +269,15 @@ export async function POST(request) {
             "create"
         );
 
-        const companyId = positiveId(user.companyId, "company");
-        const userId = positiveId(user.userId, "user");
+        const companyId = positiveId(
+            user.companyId || user.company_id,
+            "company"
+        );
+
+        const userId = positiveId(
+            user.userId || user.user_id,
+            "user"
+        );
 
         const body = await request.json();
 
@@ -257,7 +291,7 @@ export async function POST(request) {
             true
         );
 
-        const expectedReceiptDate = validDate(
+        let expectedReceiptDate = validDate(
             body.expectedReceiptDate,
             "Expected receipt date"
         );
@@ -276,7 +310,10 @@ export async function POST(request) {
             throw validationError("Invalid receipt source.");
         }
 
-        // Company check runs on the central database.
+        /* ------------------------------------------------------------------ */
+        /* Verify company in central database                                 */
+        /* ------------------------------------------------------------------ */
+
         const companyResult = await pool.query(
             `
             SELECT company_id
@@ -287,19 +324,22 @@ export async function POST(request) {
         );
 
         if (companyResult.rowCount === 0) {
-            throw validationError("Company not found.");
+            throw validationError("Company not found.", 404);
         }
 
-        // Operational data lives in the company's own database.
+        /* ------------------------------------------------------------------ */
+        /* Connect to tenant database                                          */
+        /* ------------------------------------------------------------------ */
+
         const db = await getTenantDb(user);
         client = await db.connect();
 
         await client.query("BEGIN");
 
-        // Serialize receipt number generation for this company
-        // (advisory lock replaces the old companies row lock).
-        // This prevents two simultaneous requests from generating
-        // the same receipt number for the same company.
+        /*
+         * Serialize receipt number generation for this company.
+         * This prevents simultaneous requests from generating the same number.
+         */
         await client.query(
             "SELECT pg_advisory_xact_lock($1::integer, $2::integer)",
             [companyId, 741207]
@@ -322,22 +362,28 @@ export async function POST(request) {
             const poResult = await client.query(
                 `
                 SELECT
-                    purchase_order_id,
-                    purchase_order_number,
-                    supplier_id,
-                    status,
-                    expected_delivery_date
-                FROM purchase_orders
-                WHERE purchase_order_id = $1
-                  AND company_id = $2
-                FOR UPDATE
+                    po.purchase_order_id,
+                    po.purchase_order_number,
+                    po.supplier_id,
+                    po.status,
+                    po.expected_delivery_date
+                FROM purchase_orders po
+                INNER JOIN suppliers s
+                    ON s.supplier_id = po.supplier_id
+                    AND s.company_id = po.company_id
+                WHERE po.purchase_order_id = $1
+                  AND po.company_id = $2
+                  AND po.deleted_at IS NULL
+                  AND COALESCE(s.is_active, TRUE) = TRUE
+                  AND s.deleted_at IS NULL
+                FOR UPDATE OF po
                 `,
                 [purchaseOrderId, companyId]
             );
 
             if (poResult.rowCount === 0) {
                 throw validationError(
-                    "Purchase Order not found."
+                    "Purchase Order not found, archived, or its supplier is inactive."
                 );
             }
 
@@ -351,14 +397,18 @@ export async function POST(request) {
 
             supplierId = purchaseOrder.supplier_id;
 
-            if (!expectedReceiptDate && purchaseOrder.expected_delivery_date) {
-                body.expectedReceiptDate =
-                    purchaseOrder.expected_delivery_date.toISOString
+            if (
+                !expectedReceiptDate &&
+                purchaseOrder.expected_delivery_date
+            ) {
+                expectedReceiptDate =
+                    purchaseOrder.expected_delivery_date instanceof Date
                         ? purchaseOrder.expected_delivery_date
                             .toISOString()
                             .slice(0, 10)
-                        : String(purchaseOrder.expected_delivery_date)
-                            .slice(0, 10);
+                        : String(
+                            purchaseOrder.expected_delivery_date
+                        ).slice(0, 10);
             }
 
             const poItemsResult = await client.query(
@@ -436,7 +486,7 @@ export async function POST(request) {
         }
 
         /* ------------------------------------------------------------------ */
-        /* Create manually                                                    */
+        /* Create manually                                                     */
         /* ------------------------------------------------------------------ */
 
         else {
@@ -463,13 +513,14 @@ export async function POST(request) {
                 FROM suppliers
                 WHERE supplier_id = $1
                   AND COALESCE(is_active, TRUE) = TRUE
+                  AND deleted_at IS NULL
                 `,
                 [supplierId]
             );
 
             if (supplierResult.rowCount === 0) {
                 throw validationError(
-                    "Supplier not found or inactive."
+                    "Supplier not found, archived, or inactive."
                 );
             }
 
@@ -510,13 +561,15 @@ export async function POST(request) {
                     SELECT product_id
                     FROM products
                     WHERE product_id = ANY($1::INTEGER[])
+                      AND COALESCE(is_active, TRUE) = TRUE
+                      AND deleted_at IS NULL
                     `,
                     [productIds]
                 );
 
                 if (productResult.rowCount !== productIds.length) {
                     throw validationError(
-                        "One or more selected products do not exist."
+                        "One or more selected products do not exist, are archived, or are inactive."
                     );
                 }
             }
@@ -526,9 +579,7 @@ export async function POST(request) {
         /* Generate receipt number                                             */
         /* ------------------------------------------------------------------ */
 
-        const year = new Date(`${documentDate}T00:00:00`)
-            .getFullYear();
-
+        const year = Number(documentDate.slice(0, 4));
         const prefix = `PIR-${year}-`;
 
         const numberResult = await client.query(
@@ -587,7 +638,7 @@ export async function POST(request) {
                 purchaseOrderId,
                 sourceType,
                 documentDate,
-                body.expectedReceiptDate || expectedReceiptDate,
+                expectedReceiptDate,
                 status,
                 body.remarks || null,
                 userId,
@@ -597,7 +648,7 @@ export async function POST(request) {
         const receipt = receiptResult.rows[0];
 
         /* ------------------------------------------------------------------ */
-        /* Insert items                                                        */
+        /* Insert receipt items                                                */
         /* ------------------------------------------------------------------ */
 
         for (const item of items) {

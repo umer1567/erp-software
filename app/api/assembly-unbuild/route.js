@@ -130,7 +130,7 @@ async function getItemBalance(
 }
 
 // =========================================================
-// GET: LIST ASSEMBLY UNBUILD TRANSACTIONS
+// GET: LIST ACTIVE ASSEMBLY UNBUILD TRANSACTIONS
 // =========================================================
 
 export async function GET() {
@@ -222,6 +222,7 @@ export async function GET() {
                 ON sp.sub_product_id = au.assembly_sub_product_id
 
             WHERE au.company_id = $1
+              AND au.deleted_at IS NULL
 
             ORDER BY
                 au.transaction_date DESC,
@@ -328,11 +329,9 @@ export async function POST(request) {
         transactionStarted = true;
 
         // -------------------------------------------------
-        // VALIDATE WAREHOUSE
+        // VALIDATE ACTIVE WAREHOUSE
         //
-        // IMPORTANT:
         // warehouses does not have company_id.
-        // Do not filter this table by company_id.
         // -------------------------------------------------
 
         const warehouseResult = await client.query(
@@ -344,6 +343,7 @@ export async function POST(request) {
             FROM warehouses
             WHERE warehouse_id = $1
               AND is_active = TRUE
+              AND deleted_at IS NULL
             LIMIT 1
             `,
             [warehouseId]
@@ -351,7 +351,7 @@ export async function POST(request) {
 
         if (warehouseResult.rows.length === 0) {
             throw new ApiError(
-                "Selected warehouse does not exist or is inactive.",
+                "Selected warehouse does not exist, is inactive, or has been archived.",
                 400
             );
         }
@@ -359,9 +359,7 @@ export async function POST(request) {
         const warehouse = warehouseResult.rows[0];
 
         // -------------------------------------------------
-        // VALIDATE BOM AND SELECTED ACTIVE REVISION
-        //
-        // bill_of_materials DOES have company_id.
+        // VALIDATE ACTIVE BOM AND SELECTED ACTIVE REVISION
         // -------------------------------------------------
 
         const bomResult = await client.query(
@@ -385,6 +383,7 @@ export async function POST(request) {
 
             WHERE b.bom_id = $1
               AND b.company_id = $2
+              AND b.deleted_at IS NULL
               AND br.revision_id = $3
               AND br.is_active = TRUE
 
@@ -395,7 +394,7 @@ export async function POST(request) {
 
         if (bomResult.rows.length === 0) {
             throw new ApiError(
-                "The selected BOM or active revision was not found.",
+                "The selected BOM or active revision was not found, or the BOM has been archived.",
                 404
             );
         }
@@ -432,6 +431,8 @@ export async function POST(request) {
                 SELECT product_id
                 FROM products
                 WHERE product_id = $1
+                  AND COALESCE(is_active, TRUE) = TRUE
+                  AND deleted_at IS NULL
                 LIMIT 1
                 `,
                 [assemblyProductId]
@@ -439,7 +440,7 @@ export async function POST(request) {
 
             if (productResult.rows.length === 0) {
                 throw new ApiError(
-                    "The assembly product linked to this BOM was not found."
+                    "The assembly product linked to this BOM was not found, is inactive, or has been archived."
                 );
             }
         }
@@ -535,6 +536,8 @@ export async function POST(request) {
                     SELECT product_id
                     FROM products
                     WHERE product_id = $1
+                      AND COALESCE(is_active, TRUE) = TRUE
+                      AND deleted_at IS NULL
                     LIMIT 1
                     `,
                     [productId]
@@ -542,7 +545,7 @@ export async function POST(request) {
 
                 if (productResult.rows.length === 0) {
                     throw new ApiError(
-                        `Product for BOM component ${component.component_id} was not found.`
+                        `Product for BOM component ${component.component_id} was not found, is inactive, or has been archived.`
                     );
                 }
             }
@@ -628,6 +631,7 @@ export async function POST(request) {
 
         // -------------------------------------------------
         // GENERATE COMPANY-SPECIFIC TRANSACTION NUMBER
+        // Include archived records to prevent number reuse.
         // -------------------------------------------------
 
         await client.query(

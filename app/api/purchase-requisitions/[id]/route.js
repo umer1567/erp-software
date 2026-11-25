@@ -3,8 +3,16 @@ import { NextResponse } from "next/server";
 import { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 export const dynamic = "force-dynamic";
+
+const ALLOWED_STATUSES = [
+    "DRAFT",
+    "SUBMITTED",
+    "APPROVED",
+    "REJECTED",
+];
 
 function apiError(error) {
     console.error("Purchase requisition API:", error);
@@ -63,23 +71,29 @@ function normalizeItemId(item) {
     return id;
 }
 
-function validateDate(value) {
-    const dateString = String(value || "").slice(0, 10);
+function normalizeDate(value) {
+    const dateString = String(value || "").trim().slice(0, 10);
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
-        return false;
+        throw validationError("Please provide a valid transaction date.");
     }
 
-    const date = new Date(`${dateString}T00:00:00`);
+    const [year, month, day] = dateString.split("-").map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
 
-    return (
-        !Number.isNaN(date.getTime()) &&
-        date.toISOString().slice(0, 10) === dateString
-    );
+    if (
+        parsed.getUTCFullYear() !== year ||
+        parsed.getUTCMonth() !== month - 1 ||
+        parsed.getUTCDate() !== day
+    ) {
+        throw validationError("Please provide a valid transaction date.");
+    }
+
+    return dateString;
 }
 
 /* -------------------------------------------------------------------------- */
-/* PUT: Update purchase requisition while preserving RFQ-linked item IDs       */
+/* PUT: Update purchase requisition                                            */
 /* -------------------------------------------------------------------------- */
 
 export async function PUT(request, { params }) {
@@ -90,7 +104,7 @@ export async function PUT(request, { params }) {
         const user = await getCurrentUser();
         await requirePermission(user, "purchase_requisitions", "update");
 
-        if (!user.companyId) {
+        if (!user?.companyId) {
             throw validationError("Company information is missing.");
         }
 
@@ -103,43 +117,42 @@ export async function PUT(request, { params }) {
 
         const body = await request.json();
 
-const {
-    transactionDate,
-    transaction_date,
-} = body;
+        const rawDate =
+            body.transactionDate ??
+            body.transaction_date;
 
-// Accept both camelCase and snake_case
-const rawTransactionDate = transactionDate ?? transaction_date;
+        const transactionDate = normalizeDate(rawDate);
 
-const normalizedTransactionDate = rawTransactionDate
-    ? String(rawTransactionDate).trim().slice(0, 10)
-    : "";
+        const selectedWarehouse = Number(
+            body.warehouseId ??
+            body.warehouse_id ??
+            body.locationId ??
+            body.location_id
+        );
 
-const isValidDate = /^\d{4}-\d{2}-\d{2}$/.test(
-    normalizedTransactionDate
-);
+        const status = String(body.status || "DRAFT").trim().toUpperCase();
 
-if (!isValidDate) {
-    throw validationError("Please provide a valid transaction date.");
-}
+        const selectedDepartment =
+            body.department ?? body.departmentName ?? null;
 
-const [year, month, day] = normalizedTransactionDate
-    .split("-")
-    .map(Number);
+        const selectedClass =
+            body.className ?? body.class_name ?? body.class ?? null;
 
-const parsedDate = new Date(Date.UTC(year, month - 1, day));
+        const project = body.project ?? null;
+        const memo = body.memo ?? null;
 
-if (
-    parsedDate.getUTCFullYear() !== year ||
-    parsedDate.getUTCMonth() !== month - 1 ||
-    parsedDate.getUTCDate() !== day
-) {
-    throw validationError("Please provide a valid transaction date.");
-}
+        const selectedReference =
+            body.referenceNumber ??
+            body.reference_number ??
+            body.reference ??
+            null;
+
+        const items = body.items;
+
         if (
-            !selectedWarehouse ||
-            !Number.isSafeInteger(Number(selectedWarehouse)) ||
-            !allowedStatuses.includes(String(status || "").toUpperCase())
+            !Number.isSafeInteger(selectedWarehouse) ||
+            selectedWarehouse <= 0 ||
+            !ALLOWED_STATUSES.includes(status)
         ) {
             throw validationError(
                 "Date, location, and a valid status are required."
@@ -153,17 +166,25 @@ if (
         }
 
         const normalizedItems = items.map((item) => {
-            const productId = Number(item.productId ?? item.product_id);
+            const productId = Number(
+                item.productId ?? item.product_id
+            );
+
             const quantity = Number(item.quantity);
+            const itemBalance = Number(
+                item.itemBalance ?? item.item_balance ?? 0
+            );
 
             if (
                 !Number.isSafeInteger(productId) ||
                 productId <= 0 ||
                 !Number.isFinite(quantity) ||
-                quantity <= 0
+                quantity <= 0 ||
+                !Number.isFinite(itemBalance) ||
+                itemBalance < 0
             ) {
                 throw validationError(
-                    "Every line needs a valid product and a quantity greater than zero."
+                    "Every line needs a valid product, non-negative item balance, and quantity greater than zero."
                 );
             }
 
@@ -175,12 +196,8 @@ if (
                     item.item_description ??
                     ""
                 ).trim(),
-                itemBalance: Number(
-                    item.itemBalance ?? item.item_balance ?? 0
-                ) || 0,
-                uom: String(
-                    item.uom || ""
-                ).trim(),
+                itemBalance,
+                uom: String(item.uom || "").trim(),
                 quantity,
                 memo: String(item.memo || "").trim(),
             };
@@ -196,47 +213,46 @@ if (
             );
         }
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
         client = await db.connect();
 
         await client.query("BEGIN");
         transactionStarted = true;
 
-        /* Lock the requisition header. */
+        /* Lock only an active requisition belonging to this company. */
         const existingResult = await client.query(
             `
             SELECT requisition_id, status
             FROM purchase_requisitions
             WHERE requisition_id = $1
               AND company_id = $2
+              AND deleted_at IS NULL
             FOR UPDATE
             `,
             [requisitionId, user.companyId]
         );
 
         if (!existingResult.rows.length) {
-            throw validationError("Requisition not found.", 404);
+            throw validationError("Purchase requisition not found.", 404);
         }
 
-        /* Validate warehouse. */
+        /* Validate active warehouse. */
         const warehouseResult = await client.query(
             `
             SELECT warehouse_id
             FROM warehouses
             WHERE warehouse_id = $1
               AND is_active = TRUE
+              AND deleted_at IS NULL
             `,
             [selectedWarehouse]
         );
 
         if (!warehouseResult.rows.length) {
-            throw validationError(
-                "Selected location is unavailable."
-            );
+            throw validationError("Selected location is unavailable.");
         }
 
-        /* Lock all existing lines belonging to this requisition. */
+        /* Lock existing requisition lines. */
         const existingItemsResult = await client.query(
             `
             SELECT
@@ -252,11 +268,14 @@ if (
         );
 
         const existingItems = existingItemsResult.rows;
+
         const existingIdSet = new Set(
-            existingItems.map((item) => Number(item.requisition_item_id))
+            existingItems.map((item) =>
+                Number(item.requisition_item_id)
+            )
         );
 
-        /* Prevent IDs from another requisition being updated. */
+        /* Reject item IDs belonging to another requisition. */
         for (const item of normalizedItems) {
             if (
                 item.requisitionItemId &&
@@ -270,7 +289,6 @@ if (
 
         const submittedIdSet = new Set(submittedIds);
 
-        /* Determine which old items are being removed. */
         const removedItems = existingItems.filter(
             (item) =>
                 !submittedIdSet.has(Number(item.requisition_item_id))
@@ -281,8 +299,8 @@ if (
         );
 
         /*
-         * A requisition line referenced by an RFQ cannot be removed.
-         * It can still be updated while preserving its original ID.
+         * A line already referenced by an RFQ cannot be removed.
+         * Its original requisition_item_id must be preserved.
          */
         if (removedIds.length) {
             const linkedResult = await client.query(
@@ -302,19 +320,18 @@ if (
 
             if (linkedResult.rows.length) {
                 const references = linkedResult.rows
-                    .map(
-                        (row) =>
-                            `item ${row.source_requisition_item_id} (${row.rfq_number})`
+                    .map((row) =>
+                        `item ${row.source_requisition_item_id} (${row.rfq_number || `RFQ ${row.rfq_id}`})`
                     )
                     .join(", ");
 
                 throw validationError(
-                    `You cannot remove requisition lines already used in an RFQ: ${references}. Keep those lines in the requisition to preserve procurement history.`
+                    `You cannot remove requisition lines already used in an RFQ: ${references}. Keep those lines to preserve procurement history.`
                 );
             }
         }
 
-        /* Validate all products before modifying the lines. */
+        /* Validate active products. */
         const productIds = [
             ...new Set(normalizedItems.map((item) => item.productId)),
         ];
@@ -325,6 +342,7 @@ if (
             FROM products
             WHERE product_id = ANY($1::INTEGER[])
               AND is_active = TRUE
+              AND deleted_at IS NULL
             `,
             [productIds]
         );
@@ -339,7 +357,7 @@ if (
         for (const item of normalizedItems) {
             if (!productsById.has(item.productId)) {
                 throw validationError(
-                    `Product ${item.productId} is invalid or inactive.`
+                    `Product ${item.productId} is invalid, inactive, or archived.`
                 );
             }
         }
@@ -361,10 +379,11 @@ if (
                 updated_at = NOW()
             WHERE requisition_id = $10
               AND company_id = $11
+              AND deleted_at IS NULL
             `,
             [
-                String(date).slice(0, 10),
-                String(status).toUpperCase(),
+                transactionDate,
+                status,
                 selectedWarehouse,
                 selectedDepartment || null,
                 selectedClass || null,
@@ -377,7 +396,7 @@ if (
             ]
         );
 
-        /* Update existing lines; insert new lines. */
+        /* Update existing lines and insert new lines. */
         for (const item of normalizedItems) {
             const product = productsById.get(item.productId);
 
@@ -438,7 +457,7 @@ if (
             }
         }
 
-        /* Delete only removed, unreferenced items. */
+        /* Delete only removed, unreferenced lines. */
         if (removedIds.length) {
             await client.query(
                 `
@@ -469,18 +488,15 @@ if (
 }
 
 /* -------------------------------------------------------------------------- */
-/* DELETE: Prevent deletion when the requisition is used by an RFQ             */
+/* DELETE: Archive requisition while preserving its child records              */
 /* -------------------------------------------------------------------------- */
 
 export async function DELETE(request, { params }) {
-    let client;
-    let transactionStarted = false;
-
     try {
         const user = await getCurrentUser();
         await requirePermission(user, "purchase_requisitions", "delete");
 
-        if (!user.companyId) {
+        if (!user?.companyId) {
             throw validationError("Company information is missing.");
         }
 
@@ -491,88 +507,83 @@ export async function DELETE(request, { params }) {
             throw validationError("Invalid requisition ID.");
         }
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
-        client = await db.connect();
 
-        await client.query("BEGIN");
-        transactionStarted = true;
+        const result = await archiveAndSoftDelete(
+            {
+                db,
+                companyId: user.companyId,
+                user,
+            },
+            {
+                moduleKey: "purchase_requisitions",
+                recordId: requisitionId,
 
-        const existingResult = await client.query(
-            `
-            SELECT requisition_id, transaction_number
-            FROM purchase_requisitions
-            WHERE requisition_id = $1
-              AND company_id = $2
-            FOR UPDATE
-            `,
-            [requisitionId, user.companyId]
+                validateRecord: async (client, record) => {
+                    /*
+                     * Check both requisition-level RFQ references and
+                     * item-level RFQ references. Do not remove or alter
+                     * either relationship.
+                     */
+                    const linkedResult = await client.query(
+                        `
+                        SELECT
+                            COUNT(DISTINCT ri.rfq_id)::INTEGER
+                                AS linked_rfqs,
+                            ARRAY_AGG(DISTINCT rfq.transaction_number)
+                                FILTER (
+                                    WHERE rfq.transaction_number IS NOT NULL
+                                ) AS rfq_numbers
+                        FROM rfq_items ri
+                        INNER JOIN rfqs rfq
+                            ON rfq.rfq_id = ri.rfq_id
+                        WHERE
+                            ri.source_requisition_id = $1
+                            OR ri.source_requisition_item_id IN (
+                                SELECT requisition_item_id
+                                FROM purchase_requisition_items
+                                WHERE requisition_id = $1
+                            )
+                        `,
+                        [record.requisition_id]
+                    );
+
+                    const linked = linkedResult.rows[0] || {};
+                    const linkedCount = Number(linked.linked_rfqs || 0);
+
+                    if (linkedCount > 0) {
+                        const rfqNumbers =
+                            (linked.rfq_numbers || []).join(", ");
+
+                        return {
+                            status: 409,
+                            message:
+                                `This Purchase Requisition cannot be archived because it is linked to ${linkedCount} RFQ(s): ${rfqNumbers || "RFQ records"}. Preserve the requisition to maintain procurement history.`,
+                        };
+                    }
+
+                    return null;
+                },
+            }
         );
 
-        if (!existingResult.rows.length) {
-            throw validationError("Requisition not found.", 404);
-        }
-
-        const linkedResult = await client.query(
-            `
-            SELECT
-                COUNT(*)::INTEGER AS linked_items,
-                COUNT(DISTINCT ri.rfq_id)::INTEGER AS linked_rfqs,
-                ARRAY_AGG(DISTINCT rfq.transaction_number)
-                    FILTER (WHERE rfq.transaction_number IS NOT NULL)
-                    AS rfq_numbers
-            FROM rfq_items ri
-            INNER JOIN rfqs rfq
-                ON rfq.rfq_id = ri.rfq_id
-            WHERE ri.source_requisition_id = $1
-            `,
-            [requisitionId]
-        );
-
-        const linked = linkedResult.rows[0];
-
-        if (Number(linked.linked_items) > 0) {
-            const rfqNumbers = (linked.rfq_numbers || []).join(", ");
-
-            throw validationError(
-                `This Purchase Requisition cannot be deleted because it is linked to ${linked.linked_rfqs} RFQ(s): ${rfqNumbers}. Preserve the requisition to maintain procurement history.`
+        if (!result.success) {
+            return NextResponse.json(
+                {
+                    success: false,
+                    message: result.message,
+                },
+                { status: result.status || 400 }
             );
         }
 
-        /*
-         * No RFQ references exist, so delete its lines and then its header.
-         */
-        await client.query(
-            `
-            DELETE FROM purchase_requisition_items
-            WHERE requisition_id = $1
-            `,
-            [requisitionId]
-        );
-
-        await client.query(
-            `
-            DELETE FROM purchase_requisitions
-            WHERE requisition_id = $1
-              AND company_id = $2
-            `,
-            [requisitionId, user.companyId]
-        );
-
-        await client.query("COMMIT");
-        transactionStarted = false;
-
         return NextResponse.json({
             success: true,
-            message: "Purchase requisition deleted successfully.",
+            message: "Purchase requisition moved to the Recycle Bin.",
+            archiveId: result.archiveId,
+            requisition: result.record,
         });
     } catch (error) {
-        if (transactionStarted && client) {
-            await client.query("ROLLBACK").catch(() => {});
-        }
-
         return apiError(error);
-    } finally {
-        client?.release();
     }
 }

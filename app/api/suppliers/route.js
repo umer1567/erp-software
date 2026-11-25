@@ -36,6 +36,7 @@ export async function GET() {
         FROM purchase_payments
         GROUP BY supplier_id
       ) pay ON pay.supplier_id = s.supplier_id
+       WHERE s.deleted_at IS NULL
       ORDER BY s.supplier_id DESC
     `);
 

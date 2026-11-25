@@ -4,6 +4,7 @@ import { getTenantDb } from "@/lib/db";
 import { getCompanyProfile } from "@/lib/tenant";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 
 /* -------------------------------------------------------------------------- */
 /* Constants                                                                  */
@@ -27,16 +28,14 @@ function apiError(error) {
 
     const status =
         Number(error?.status || error?.statusCode) >= 400 &&
-            Number(error?.status || error?.statusCode) < 600
+        Number(error?.status || error?.statusCode) < 600
             ? Number(error.status || error.statusCode)
             : 500;
 
     return NextResponse.json(
         {
             success: false,
-            message:
-                error?.message ||
-                "An unexpected error occurred.",
+            message: error?.message || "An unexpected error occurred.",
         },
         { status }
     );
@@ -64,11 +63,7 @@ function decimal(value, fieldName, options = {}) {
         defaultValue = null,
     } = options;
 
-    if (
-        value === undefined ||
-        value === null ||
-        value === ""
-    ) {
+    if (value === undefined || value === null || value === "") {
         if (defaultValue !== null) {
             return defaultValue;
         }
@@ -164,8 +159,8 @@ function prepareItems(items) {
 
         const productId =
             item.productId === null ||
-                item.productId === undefined ||
-                item.productId === ""
+            item.productId === undefined ||
+            item.productId === ""
                 ? null
                 : positiveId(
                     item.productId,
@@ -201,9 +196,7 @@ function prepareItems(items) {
             )
         );
 
-        const baseAmount = roundMoney(
-            quantity * unitPrice
-        );
+        const baseAmount = roundMoney(quantity * unitPrice);
 
         if (discountAmount > baseAmount) {
             throw validationError(
@@ -223,8 +216,8 @@ function prepareItems(items) {
 
         const taxAmount =
             item.taxAmount !== undefined &&
-                item.taxAmount !== null &&
-                item.taxAmount !== ""
+            item.taxAmount !== null &&
+            item.taxAmount !== ""
                 ? roundMoney(
                     decimal(
                         item.taxAmount,
@@ -300,6 +293,46 @@ function calculateTotals(items) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Check Linked Receiving Documents                                           */
+/* -------------------------------------------------------------------------- */
+
+async function getReceivingDocuments(client, purchaseOrderId, companyId) {
+    const result = await client.query(
+        `
+        SELECT
+            (
+                SELECT COUNT(*)
+                FROM pending_item_receipts
+                WHERE
+                    purchase_order_id = $1
+                    AND company_id = $2
+            ) AS pending_receipts,
+
+            (
+                SELECT COUNT(*)
+                FROM item_receipts
+                WHERE
+                    purchase_order_id = $1
+                    AND company_id = $2
+            ) AS item_receipts
+        `,
+        [purchaseOrderId, companyId]
+    );
+
+    return result.rows[0] || {
+        pending_receipts: 0,
+        item_receipts: 0,
+    };
+}
+
+function hasReceivingDocuments(receiving) {
+    return (
+        Number(receiving?.pending_receipts || 0) > 0 ||
+        Number(receiving?.item_receipts || 0) > 0
+    );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Load Purchase Order                                                        */
 /* -------------------------------------------------------------------------- */
 
@@ -329,6 +362,7 @@ async function getPurchaseOrder(client, id, companyId) {
         WHERE
             po.purchase_order_id = $1
             AND po.company_id = $2
+            AND po.deleted_at IS NULL
 
         LIMIT 1
         `,
@@ -339,7 +373,7 @@ async function getPurchaseOrder(client, id, companyId) {
         return null;
     }
 
-        const itemsResult = await client.query(
+    const itemsResult = await client.query(
         `
         SELECT
             i.*,
@@ -375,7 +409,6 @@ async function getPurchaseOrder(client, id, companyId) {
             WHERE
                 iri.purchase_order_item_id =
                     i.purchase_order_item_id
-
                 AND ir.company_id = $2
                 AND ir.status = 'APPROVED'
 
@@ -390,7 +423,6 @@ async function getPurchaseOrder(client, id, companyId) {
         [id, companyId]
     );
 
-    // Company name comes from the central database.
     const company = await getCompanyProfile(companyId);
 
     return {
@@ -432,7 +464,6 @@ export async function GET(request, context) {
             "purchase order ID"
         );
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
 
         const purchaseOrder = await getPurchaseOrder(
@@ -518,16 +549,15 @@ export async function PATCH(request, context) {
             throw validationError("Invalid request body.");
         }
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
         client = await db.connect();
 
         await client.query("BEGIN");
         transactionStarted = true;
 
-        /* -------------------------------------------------------------- */
-        /* Lock Existing Purchase Order                                   */
-        /* -------------------------------------------------------------- */
+        /* ------------------------------------------------------------------ */
+        /* Lock Existing Purchase Order                                       */
+        /* ------------------------------------------------------------------ */
 
         const currentResult = await client.query(
             `
@@ -537,6 +567,7 @@ export async function PATCH(request, context) {
             WHERE
                 purchase_order_id = $1
                 AND company_id = $2
+                AND deleted_at IS NULL
 
             FOR UPDATE
             `,
@@ -554,13 +585,31 @@ export async function PATCH(request, context) {
 
         if (current.status !== "DRAFT") {
             throw validationError(
-                "Only DRAFT Purchase Orders can be edited."
+                "Only DRAFT Purchase Orders can be edited.",
+                409
             );
         }
 
-        /* -------------------------------------------------------------- */
-        /* Supplier                                                        */
-        /* -------------------------------------------------------------- */
+        /* ------------------------------------------------------------------ */
+        /* Protect Receiving Documents                                        */
+        /* ------------------------------------------------------------------ */
+
+        const receiving = await getReceivingDocuments(
+            client,
+            id,
+            companyId
+        );
+
+        if (hasReceivingDocuments(receiving)) {
+            throw validationError(
+                "This Purchase Order cannot be edited because Pending Item Receipts or Item Receipts are already linked to it.",
+                409
+            );
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Supplier                                                            */
+        /* ------------------------------------------------------------------ */
 
         const supplierId = positiveId(
             body.supplierId ?? current.supplier_id,
@@ -575,6 +624,7 @@ export async function PATCH(request, context) {
             WHERE
                 supplier_id = $1
                 AND COALESCE(is_active, TRUE) = TRUE
+                AND deleted_at IS NULL
 
             LIMIT 1
             `,
@@ -583,13 +633,13 @@ export async function PATCH(request, context) {
 
         if (!supplierResult.rowCount) {
             throw validationError(
-                "Selected supplier does not exist or is inactive."
+                "Selected supplier does not exist, is inactive, or has been archived."
             );
         }
 
-        /* -------------------------------------------------------------- */
-        /* Dates                                                           */
-        /* -------------------------------------------------------------- */
+        /* ------------------------------------------------------------------ */
+        /* Dates                                                               */
+        /* ------------------------------------------------------------------ */
 
         const orderDate = validDate(
             body.orderDate !== undefined
@@ -606,18 +656,9 @@ export async function PATCH(request, context) {
             "Expected delivery date"
         );
 
-        // if (
-        //     expectedDeliveryDate &&
-        //     expectedDeliveryDate < orderDate
-        // ) {
-        //     throw validationError(
-        //         "Expected delivery date cannot be earlier than the order date."
-        //     );
-        // }
-
-        /* -------------------------------------------------------------- */
-        /* Status and Currency                                             */
-        /* -------------------------------------------------------------- */
+        /* ------------------------------------------------------------------ */
+        /* Status and Currency                                                 */
+        /* ------------------------------------------------------------------ */
 
         const status = validStatus(
             body.status !== undefined
@@ -645,29 +686,36 @@ export async function PATCH(request, context) {
             { allowZero: false }
         );
 
-        /* -------------------------------------------------------------- */
-        /* Items and Totals                                                */
-        /* -------------------------------------------------------------- */
+        /* ------------------------------------------------------------------ */
+        /* Items and Totals                                                    */
+        /* ------------------------------------------------------------------ */
 
         const items = prepareItems(body.items);
 
         for (const item of items) {
-            if (item.productId) {
-                const productResult = await client.query(
-                    `
-                    SELECT product_id
-                    FROM products
-                    WHERE product_id = $1
-                    LIMIT 1
-                    `,
-                    [item.productId]
-                );
+            if (!item.productId) {
+                continue;
+            }
 
-                if (!productResult.rowCount) {
-                    throw validationError(
-                        `Product ID ${item.productId} does not exist.`
-                    );
-                }
+            const productResult = await client.query(
+                `
+                SELECT product_id
+                FROM products
+
+                WHERE
+                    product_id = $1
+                    AND COALESCE(is_active, TRUE) = TRUE
+                    AND deleted_at IS NULL
+
+                LIMIT 1
+                `,
+                [item.productId]
+            );
+
+            if (!productResult.rowCount) {
+                throw validationError(
+                    `Product ID ${item.productId} does not exist, is inactive, or has been archived.`
+                );
             }
         }
 
@@ -687,9 +735,9 @@ export async function PATCH(request, context) {
                     : null
                 : current.remarks;
 
-        /* -------------------------------------------------------------- */
-        /* Update Header                                                   */
-        /* -------------------------------------------------------------- */
+        /* ------------------------------------------------------------------ */
+        /* Update Header                                                       */
+        /* ------------------------------------------------------------------ */
 
         await client.query(
             `
@@ -717,6 +765,7 @@ export async function PATCH(request, context) {
             WHERE
                 purchase_order_id = $14
                 AND company_id = $15
+                AND deleted_at IS NULL
             `,
             [
                 supplierId,
@@ -737,9 +786,9 @@ export async function PATCH(request, context) {
             ]
         );
 
-        /* -------------------------------------------------------------- */
-        /* Replace Existing Items                                          */
-        /* -------------------------------------------------------------- */
+        /* ------------------------------------------------------------------ */
+        /* Replace Existing Items                                              */
+        /* ------------------------------------------------------------------ */
 
         await client.query(
             `
@@ -786,9 +835,9 @@ export async function PATCH(request, context) {
             );
         }
 
-        /* -------------------------------------------------------------- */
-        /* Commit                                                          */
-        /* -------------------------------------------------------------- */
+        /* ------------------------------------------------------------------ */
+        /* Commit                                                              */
+        /* ------------------------------------------------------------------ */
 
         await client.query("COMMIT");
         transactionStarted = false;
@@ -825,13 +874,10 @@ export async function PATCH(request, context) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* DELETE: Delete DRAFT Purchase Order                                        */
+/* DELETE: Archive DRAFT Purchase Order                                       */
 /* -------------------------------------------------------------------------- */
 
 export async function DELETE(request, context) {
-    let client;
-    let transactionStarted = false;
-
     try {
         const user = await getCurrentUser();
 
@@ -841,9 +887,9 @@ export async function DELETE(request, context) {
             "delete"
         );
 
-        if (!user.companyId) {
+        if (!user.companyId || !user.userId) {
             throw validationError(
-                "Company information is missing."
+                "User or company information is missing."
             );
         }
 
@@ -852,87 +898,64 @@ export async function DELETE(request, context) {
             "company"
         );
 
-        const params = await context.params;
-
         const id = positiveId(
-            params.id,
+            (await context.params).id,
             "purchase order ID"
         );
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
-        client = await db.connect();
 
-        await client.query("BEGIN");
-        transactionStarted = true;
+        const result = await archiveAndSoftDelete(
+            { user, db, companyId },
+            {
+                moduleKey: "purchase_orders",
+                recordId: id,
+                deletionReason: "Purchase Order archived by user",
 
-        const currentResult = await client.query(
-            `
-            SELECT
-                purchase_order_id,
-                purchase_order_number,
-                status
+                validateRecord: async (client, record) => {
+                    if (record.status !== "DRAFT") {
+                        return {
+                            status: 409,
+                            message:
+                                "Only DRAFT Purchase Orders can be archived.",
+                        };
+                    }
 
-            FROM purchase_orders
+                    const receiving = await getReceivingDocuments(
+                        client,
+                        record.purchase_order_id,
+                        companyId
+                    );
 
-            WHERE
-                purchase_order_id = $1
-                AND company_id = $2
+                    if (hasReceivingDocuments(receiving)) {
+                        return {
+                            status: 409,
+                            message:
+                                "This Purchase Order cannot be archived because Pending Item Receipts or Item Receipts are linked to it. Preserve the receiving history.",
+                        };
+                    }
 
-            FOR UPDATE
-            `,
-            [id, companyId]
+                    return null;
+                },
+            }
         );
 
-        if (!currentResult.rowCount) {
-            throw validationError(
-                "Purchase Order not found.",
-                404
+        if (!result.success) {
+            return NextResponse.json(
+                {
+                    success: false,
+                    message: result.message,
+                },
+                { status: result.status || 400 }
             );
         }
-
-        const current = currentResult.rows[0];
-
-        if (current.status !== "DRAFT") {
-            throw validationError(
-                "Only DRAFT Purchase Orders can be deleted."
-            );
-        }
-
-        await client.query(
-            `
-            DELETE FROM purchase_orders
-
-            WHERE
-                purchase_order_id = $1
-                AND company_id = $2
-            `,
-            [id, companyId]
-        );
-
-        await client.query("COMMIT");
-        transactionStarted = false;
 
         return NextResponse.json({
             success: true,
-            message: `Purchase Order ${current.purchase_order_number} deleted successfully.`,
+            message: "Purchase Order moved to Recycle Bin successfully.",
+            archiveId: result.archiveId,
         });
     } catch (error) {
-        if (client && transactionStarted) {
-            try {
-                await client.query("ROLLBACK");
-            } catch (rollbackError) {
-                console.error(
-                    "Purchase Order delete rollback error:",
-                    rollbackError
-                );
-            }
-        }
-
         return apiError(error);
-    } finally {
-        if (client) {
-            client.release();
-        }
     }
 }

@@ -60,13 +60,12 @@ function positiveId(value, fieldName) {
 }
 
 function decimal(value, fieldName, options = {}) {
-    const { allowZero = true, defaultValue = null } = options;
+    const {
+        allowZero = true,
+        defaultValue = null,
+    } = options;
 
-    if (
-        value === undefined ||
-        value === null ||
-        value === ""
-    ) {
+    if (value === undefined || value === null || value === "") {
         if (defaultValue !== null) {
             return defaultValue;
         }
@@ -103,7 +102,9 @@ function validDate(value, fieldName, required = false) {
     const date = String(value).slice(0, 10);
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-        throw validationError(`${fieldName} must use YYYY-MM-DD format.`);
+        throw validationError(
+            `${fieldName} must use YYYY-MM-DD format.`
+        );
     }
 
     const parsed = new Date(`${date}T00:00:00.000Z`);
@@ -124,14 +125,18 @@ function validStatus(value, defaultValue = "DRAFT") {
         .toUpperCase();
 
     if (!ALLOWED_STATUSES.includes(status)) {
-        throw validationError(`Invalid purchase order status: ${status}.`);
+        throw validationError(
+            `Invalid purchase order status: ${status}.`
+        );
     }
 
     return status;
 }
 
 function roundMoney(value) {
-    return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+    return Math.round(
+        (Number(value) + Number.EPSILON) * 100
+    ) / 100;
 }
 
 function getOrderNumberYear(orderDate) {
@@ -144,10 +149,13 @@ function getOrderNumberYear(orderDate) {
 /* Generate Purchase Order Number                                             */
 /* -------------------------------------------------------------------------- */
 
-async function generatePurchaseOrderNumber(client, companyId, orderDate) {
+async function generatePurchaseOrderNumber(
+    client,
+    companyId,
+    orderDate
+) {
     const year = getOrderNumberYear(orderDate);
 
-    // Serialize number generation for this company.
     await client.query(
         "SELECT pg_advisory_xact_lock($1::integer, $2::integer)",
         [companyId, 7142026]
@@ -169,9 +177,12 @@ async function generatePurchaseOrderNumber(client, companyId, orderDate) {
                 ),
                 0
             ) AS last_number
+
         FROM purchase_orders
-        WHERE company_id = $1
-          AND purchase_order_number ~ $2
+
+        WHERE
+            company_id = $1
+            AND purchase_order_number ~ $2
         `,
         [
             companyId,
@@ -179,22 +190,27 @@ async function generatePurchaseOrderNumber(client, companyId, orderDate) {
         ]
     );
 
-    const nextNumber = Number(result.rows[0]?.last_number || 0) + 1;
+    const nextNumber =
+        Number(result.rows[0]?.last_number || 0) + 1;
 
     return `PO-${year}-${String(nextNumber).padStart(6, "0")}`;
 }
 
 /* -------------------------------------------------------------------------- */
-/* Validate Manual Purchase Order Items                                        */
+/* Validate Manual Purchase Order Items                                       */
 /* -------------------------------------------------------------------------- */
 
 function prepareManualItems(items) {
     if (!Array.isArray(items) || items.length === 0) {
-        throw validationError("At least one purchase order item is required.");
+        throw validationError(
+            "At least one purchase order item is required."
+        );
     }
 
     if (items.length > MAX_ITEMS) {
-        throw validationError(`A maximum of ${MAX_ITEMS} items is allowed.`);
+        throw validationError(
+            `A maximum of ${MAX_ITEMS} items is allowed.`
+        );
     }
 
     return items.map((item, index) => {
@@ -205,7 +221,10 @@ function prepareManualItems(items) {
             item.productId === undefined ||
             item.productId === ""
                 ? null
-                : positiveId(item.productId, `Product ID on item ${itemNumber}`);
+                : positiveId(
+                    item.productId,
+                    `Product ID on item ${itemNumber}`
+                );
 
         const itemDescription = String(
             item.itemDescription || ""
@@ -236,7 +255,9 @@ function prepareManualItems(items) {
             )
         );
 
-        const baseAmount = roundMoney(quantity * unitPrice);
+        const baseAmount = roundMoney(
+            quantity * unitPrice
+        );
 
         if (discountAmount > baseAmount) {
             throw validationError(
@@ -250,7 +271,9 @@ function prepareManualItems(items) {
             { defaultValue: 0 }
         );
 
-        const taxableAmount = roundMoney(baseAmount - discountAmount);
+        const taxableAmount = roundMoney(
+            baseAmount - discountAmount
+        );
 
         const taxAmount =
             item.taxAmount !== undefined &&
@@ -262,14 +285,20 @@ function prepareManualItems(items) {
                         `Tax amount on item ${itemNumber}`
                     )
                 )
-                : roundMoney((taxableAmount * taxRate) / 100);
+                : roundMoney(
+                    taxableAmount * taxRate / 100
+                );
 
-        const lineTotal = roundMoney(taxableAmount + taxAmount);
+        const lineTotal = roundMoney(
+            taxableAmount + taxAmount
+        );
 
         return {
             productId,
             itemDescription,
-            uom: item.uom ? String(item.uom).trim() : null,
+            uom: item.uom
+                ? String(item.uom).trim()
+                : null,
             quantity,
             unitPrice,
             discountAmount,
@@ -284,7 +313,41 @@ function prepareManualItems(items) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Insert Purchase Order Items                                                 */
+/* Validate Product                                                          */
+/* -------------------------------------------------------------------------- */
+
+async function validatePurchaseOrderProduct(
+    client,
+    productId
+) {
+    if (!productId) {
+        return;
+    }
+
+    const productResult = await client.query(
+        `
+        SELECT product_id
+        FROM products
+
+        WHERE
+            product_id = $1
+            AND COALESCE(is_active, TRUE) = TRUE
+            AND deleted_at IS NULL
+
+        LIMIT 1
+        `,
+        [productId]
+    );
+
+    if (!productResult.rowCount) {
+        throw validationError(
+            `Product ID ${productId} does not exist, is inactive, or has been archived.`
+        );
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Insert Purchase Order Items                                                */
 /* -------------------------------------------------------------------------- */
 
 async function insertPurchaseOrderItems(
@@ -293,23 +356,10 @@ async function insertPurchaseOrderItems(
     items
 ) {
     for (const item of items) {
-        if (item.productId) {
-            const productResult = await client.query(
-                `
-                SELECT product_id
-                FROM products
-                WHERE product_id = $1
-                LIMIT 1
-                `,
-                [item.productId]
-            );
-
-            if (!productResult.rowCount) {
-                throw validationError(
-                    `Product ID ${item.productId} does not exist.`
-                );
-            }
-        }
+        await validatePurchaseOrderProduct(
+            client,
+            item.productId
+        );
 
         await client.query(
             `
@@ -349,7 +399,37 @@ async function insertPurchaseOrderItems(
 }
 
 /* -------------------------------------------------------------------------- */
-/* GET: Purchase Order History + Dropdown Data                                 */
+/* Validate Supplier                                                          */
+/* -------------------------------------------------------------------------- */
+
+async function validatePurchaseOrderSupplier(
+    client,
+    supplierId
+) {
+    const supplierResult = await client.query(
+        `
+        SELECT supplier_id
+        FROM suppliers
+
+        WHERE
+            supplier_id = $1
+            AND COALESCE(is_active, TRUE) = TRUE
+            AND deleted_at IS NULL
+
+        LIMIT 1
+        `,
+        [supplierId]
+    );
+
+    if (!supplierResult.rowCount) {
+        throw validationError(
+            "Selected supplier does not exist, is inactive, or has been archived."
+        );
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/* GET: Purchase Order History + Dropdown Data                                */
 /* -------------------------------------------------------------------------- */
 
 export async function GET() {
@@ -363,7 +443,9 @@ export async function GET() {
         );
 
         if (!user.companyId) {
-            throw validationError("Company information is missing.");
+            throw validationError(
+                "Company information is missing."
+            );
         }
 
         const companyId = positiveId(
@@ -371,110 +453,135 @@ export async function GET() {
             "company"
         );
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
 
-        const [ordersResult, suppliersResult, quotationsResult] =
-            await Promise.all([
-                db.query(
-                    `
+        const [
+            ordersResult,
+            suppliersResult,
+            quotationsResult,
+        ] = await Promise.all([
+            /* -------------------------------------------------------------- */
+            /* Purchase Order History                                         */
+            /* -------------------------------------------------------------- */
+
+            db.query(
+                `
+                SELECT
+                    po.*,
+
+                    s.supplier_name,
+                    s.supplier_code,
+
+                    pq.quotation_number,
+
+                    COALESCE(
+                        item_counts.item_count,
+                        0
+                    )::INTEGER AS item_count
+
+                FROM purchase_orders po
+
+                INNER JOIN suppliers s
+                    ON s.supplier_id = po.supplier_id
+
+                LEFT JOIN purchase_quotations pq
+                    ON pq.purchase_quotation_id =
+                       po.purchase_quotation_id
+
+                LEFT JOIN (
                     SELECT
-                        po.*,
+                        purchase_order_id,
+                        COUNT(*) AS item_count
 
-                        s.supplier_name,
-                        s.supplier_code,
+                    FROM purchase_order_items
 
-                        pq.quotation_number,
+                    GROUP BY purchase_order_id
+                ) item_counts
+                    ON item_counts.purchase_order_id =
+                       po.purchase_order_id
 
-                        COALESCE(item_counts.item_count, 0)::INTEGER
-                            AS item_count
+                WHERE
+                    po.company_id = $1
+                    AND po.deleted_at IS NULL
 
-                    FROM purchase_orders po
+                ORDER BY
+                    po.order_date DESC,
+                    po.purchase_order_id DESC
+                `,
+                [companyId]
+            ),
 
-                    INNER JOIN suppliers s
-                        ON s.supplier_id = po.supplier_id
+            /* -------------------------------------------------------------- */
+            /* Active Suppliers Dropdown                                      */
+            /* -------------------------------------------------------------- */
 
-                    LEFT JOIN purchase_quotations pq
-                        ON pq.purchase_quotation_id =
-                           po.purchase_quotation_id
+            db.query(
+                `
+                SELECT
+                    supplier_id,
+                    supplier_code,
+                    supplier_name,
+                    phone,
+                    email,
+                    address
 
-                    LEFT JOIN (
-                        SELECT
-                            purchase_order_id,
-                            COUNT(*) AS item_count
-                        FROM purchase_order_items
-                        GROUP BY purchase_order_id
-                    ) item_counts
-                        ON item_counts.purchase_order_id =
-                           po.purchase_order_id
+                FROM suppliers
 
-                    WHERE po.company_id = $1
+                WHERE
+                    COALESCE(is_active, TRUE) = TRUE
+                    AND deleted_at IS NULL
 
-                    ORDER BY
-                        po.order_date DESC,
-                        po.purchase_order_id DESC
-                    `,
-                    [companyId]
-                ),
+                ORDER BY supplier_name ASC
+                `
+            ),
 
-                db.query(
-                    `
-                    SELECT
-                        supplier_id,
-                        supplier_code,
-                        supplier_name,
-                        phone,
-                        email,
-                        address
+            /* -------------------------------------------------------------- */
+            /* Approved Purchase Quotations Available for Conversion          */
+            /* -------------------------------------------------------------- */
 
-                    FROM suppliers
+            db.query(
+                `
+                SELECT
+                    pq.purchase_quotation_id,
+                    pq.quotation_number,
+                    pq.supplier_id,
+                    pq.quotation_date,
+                    pq.valid_until,
+                    pq.currency_code,
+                    pq.exchange_rate,
+                    pq.subtotal,
+                    pq.discount_amount,
+                    pq.tax_amount,
+                    pq.grand_total,
+                    pq.status,
 
-                    WHERE COALESCE(is_active, TRUE) = TRUE
+                    s.supplier_name,
+                    s.supplier_code
 
-                    ORDER BY supplier_name ASC
-                    `
-                ),
+                FROM purchase_quotations pq
 
-                db.query(
-                    `
-                    SELECT
-                        pq.purchase_quotation_id,
-                        pq.quotation_number,
-                        pq.supplier_id,
-                        pq.quotation_date,
-                        pq.valid_until,
-                        pq.currency_code,
-                        pq.exchange_rate,
-                        pq.subtotal,
-                        pq.discount_amount,
-                        pq.tax_amount,
-                        pq.grand_total,
-                        pq.status,
+                INNER JOIN suppliers s
+                    ON s.supplier_id = pq.supplier_id
 
-                        s.supplier_name,
-                        s.supplier_code
+                LEFT JOIN purchase_orders po
+                    ON po.purchase_quotation_id =
+                       pq.purchase_quotation_id
 
-                    FROM purchase_quotations pq
+                WHERE
+                    pq.company_id = $1
+                    AND pq.status = 'APPROVED'
+                    AND pq.deleted_at IS NULL
+                    AND COALESCE(s.is_active, TRUE) = TRUE
+                    AND s.deleted_at IS NULL
+                    AND po.purchase_order_id IS NULL
 
-                    INNER JOIN suppliers s
-                        ON s.supplier_id = pq.supplier_id
-
-                    LEFT JOIN purchase_orders po
-                        ON po.purchase_quotation_id =
-                           pq.purchase_quotation_id
-
-                    WHERE
-                        pq.company_id = $1
-                        AND pq.status = 'APPROVED'
-                        AND po.purchase_order_id IS NULL
-
-                    ORDER BY
-                        pq.quotation_date DESC,
-                        pq.purchase_quotation_id DESC
-                    `,
-                    [companyId]
-                ),
-            ]);
+                ORDER BY
+                    pq.quotation_date DESC,
+                    pq.purchase_quotation_id DESC
+                `,
+                [companyId]
+            ),
+        ]);
 
         return NextResponse.json({
             success: true,
@@ -488,7 +595,7 @@ export async function GET() {
 }
 
 /* -------------------------------------------------------------------------- */
-/* POST: Create Manual Purchase Order OR Convert Purchase Quotation            */
+/* POST: Create Manual Purchase Order OR Convert Purchase Quotation           */
 /* -------------------------------------------------------------------------- */
 
 export async function POST(request) {
@@ -505,11 +612,15 @@ export async function POST(request) {
         );
 
         if (!user.companyId) {
-            throw validationError("Company information is missing.");
+            throw validationError(
+                "Company information is missing."
+            );
         }
 
         if (!user.userId) {
-            throw validationError("User information is missing.");
+            throw validationError(
+                "User information is missing."
+            );
         }
 
         const companyId = positiveId(
@@ -527,7 +638,9 @@ export async function POST(request) {
         try {
             body = await request.json();
         } catch {
-            throw validationError("Invalid request body. Please send valid JSON.");
+            throw validationError(
+                "Invalid request body. Please send valid JSON."
+            );
         }
 
         if (
@@ -554,29 +667,23 @@ export async function POST(request) {
             );
         }
 
-        const orderDate = validDate(
-            body.orderDate,
-            "Order date",
-            false
-        ) || new Date().toISOString().slice(0, 10);
+        const orderDate =
+            validDate(
+                body.orderDate,
+                "Order date",
+                false
+            ) || new Date().toISOString().slice(0, 10);
 
         const expectedDeliveryDate = validDate(
             body.expectedDeliveryDate,
             "Expected delivery date"
         );
 
-        // if (
-        //     expectedDeliveryDate &&
-        //     expectedDeliveryDate < orderDate
-        // ) {
-        //     throw validationError(
-        //         "Expected delivery date cannot be earlier than the order date."
-        //     );
-        // }
+        const status = validStatus(
+            body.status,
+            "DRAFT"
+        );
 
-        const status = validStatus(body.status, "DRAFT");
-
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
         client = await db.connect();
 
@@ -620,6 +727,7 @@ export async function POST(request) {
                 WHERE
                     purchase_quotation_id = $1
                     AND company_id = $2
+                    AND deleted_at IS NULL
 
                 FOR UPDATE
                 `,
@@ -628,7 +736,7 @@ export async function POST(request) {
 
             if (!quotationResult.rowCount) {
                 throw validationError(
-                    "Purchase quotation not found.",
+                    "Purchase quotation not found or has been archived.",
                     404
                 );
             }
@@ -641,15 +749,28 @@ export async function POST(request) {
                 );
             }
 
+            /* -------------------------------------------------------------- */
+            /* Prevent Duplicate Conversion                                   */
+            /* -------------------------------------------------------------- */
+
+            // Intentionally includes archived Purchase Orders.
+            // An archived PO must not make its quotation available again.
+
             const existingOrder = await client.query(
                 `
-                SELECT purchase_order_id, purchase_order_number
+                SELECT
+                    purchase_order_id,
+                    purchase_order_number
+
                 FROM purchase_orders
 
-                WHERE purchase_quotation_id = $1
+                WHERE
+                    purchase_quotation_id = $1
+                    AND company_id = $2
+
                 LIMIT 1
                 `,
-                [quotationId]
+                [quotationId, companyId]
             );
 
             if (existingOrder.rowCount) {
@@ -664,6 +785,11 @@ export async function POST(request) {
                 "supplier"
             );
 
+            await validatePurchaseOrderSupplier(
+                client,
+                supplierId
+            );
+
             currencyCode = quotation.currency_code || "PKR";
 
             exchangeRate = decimal(
@@ -672,14 +798,25 @@ export async function POST(request) {
                 { allowZero: false }
             );
 
-            subtotal = roundMoney(quotation.subtotal || 0);
+            subtotal = roundMoney(
+                quotation.subtotal || 0
+            );
+
             discountAmount = roundMoney(
                 quotation.discount_amount || 0
             );
-            taxAmount = roundMoney(quotation.tax_amount || 0);
-            grandTotal = roundMoney(quotation.grand_total || 0);
 
-            termsConditions = quotation.terms_conditions || null;
+            taxAmount = roundMoney(
+                quotation.tax_amount || 0
+            );
+
+            grandTotal = roundMoney(
+                quotation.grand_total || 0
+            );
+
+            termsConditions =
+                quotation.terms_conditions || null;
+
             remarks = quotation.remarks || null;
 
             const quotationItemsResult = await client.query(
@@ -711,51 +848,64 @@ export async function POST(request) {
                 );
             }
 
-            items = quotationItemsResult.rows.map((item, index) => ({
-                productId: item.product_id
-                    ? positiveId(item.product_id, `Product on item ${index + 1}`)
-                    : null,
+            items = quotationItemsResult.rows.map(
+                (item, index) => ({
+                    productId: item.product_id
+                        ? positiveId(
+                            item.product_id,
+                            `Product on item ${index + 1}`
+                        )
+                        : null,
 
-                itemDescription: item.item_description,
-                uom: item.uom || null,
+                    itemDescription: item.item_description,
+                    uom: item.uom || null,
 
-                quantity: decimal(
-                    item.quantity,
-                    `Quantity on item ${index + 1}`,
-                    { allowZero: false }
-                ),
+                    quantity: decimal(
+                        item.quantity,
+                        `Quantity on item ${index + 1}`,
+                        { allowZero: false }
+                    ),
 
-                unitPrice: decimal(
-                    item.unit_price,
-                    `Unit price on item ${index + 1}`
-                ),
+                    unitPrice: decimal(
+                        item.unit_price,
+                        `Unit price on item ${index + 1}`
+                    ),
 
-                discountAmount: decimal(
-                    item.discount_amount,
-                    `Discount on item ${index + 1}`,
-                    { defaultValue: 0 }
-                ),
+                    discountAmount: decimal(
+                        item.discount_amount,
+                        `Discount on item ${index + 1}`,
+                        { defaultValue: 0 }
+                    ),
 
-                taxRate: decimal(
-                    item.tax_rate,
-                    `Tax rate on item ${index + 1}`,
-                    { defaultValue: 0 }
-                ),
+                    taxRate: decimal(
+                        item.tax_rate,
+                        `Tax rate on item ${index + 1}`,
+                        { defaultValue: 0 }
+                    ),
 
-                taxAmount: decimal(
-                    item.tax_amount,
-                    `Tax amount on item ${index + 1}`,
-                    { defaultValue: 0 }
-                ),
+                    taxAmount: decimal(
+                        item.tax_amount,
+                        `Tax amount on item ${index + 1}`,
+                        { defaultValue: 0 }
+                    ),
 
-                lineTotal: decimal(
-                    item.line_total,
-                    `Line total on item ${index + 1}`,
-                    { defaultValue: 0 }
-                ),
+                    lineTotal: decimal(
+                        item.line_total,
+                        `Line total on item ${index + 1}`,
+                        { defaultValue: 0 }
+                    ),
 
-                remarks: item.remarks || null,
-            }));
+                    remarks: item.remarks || null,
+                })
+            );
+
+            // Validate every linked product before creating the PO.
+            for (const item of items) {
+                await validatePurchaseOrderProduct(
+                    client,
+                    item.productId
+                );
+            }
 
             // Keep quotation values unchanged during conversion.
         } else {
@@ -768,35 +918,24 @@ export async function POST(request) {
                 "supplier"
             );
 
-            const supplierResult = await client.query(
-                `
-                SELECT supplier_id
-                FROM suppliers
-
-                WHERE
-                    supplier_id = $1
-                    AND COALESCE(is_active, TRUE) = TRUE
-
-                LIMIT 1
-                `,
-                [supplierId]
+            await validatePurchaseOrderSupplier(
+                client,
+                supplierId
             );
-
-            if (!supplierResult.rowCount) {
-                throw validationError(
-                    "Selected supplier does not exist or is inactive."
-                );
-            }
 
             currencyCode = String(
                 body.currencyCode || "PKR"
-            ).trim().toUpperCase();
+            )
+                .trim()
+                .toUpperCase();
 
             if (
                 !currencyCode ||
                 currencyCode.length > 10
             ) {
-                throw validationError("Invalid currency code.");
+                throw validationError(
+                    "Invalid currency code."
+                );
             }
 
             exchangeRate = decimal(
@@ -933,10 +1072,9 @@ export async function POST(request) {
         return NextResponse.json(
             {
                 success: true,
-                message:
-                    quotationId
-                        ? "Purchase Order successfully created from Purchase Quotation."
-                        : "Purchase Order successfully created.",
+                message: quotationId
+                    ? "Purchase Order successfully created from Purchase Quotation."
+                    : "Purchase Order successfully created.",
 
                 purchaseOrder: {
                     ...purchaseOrder,

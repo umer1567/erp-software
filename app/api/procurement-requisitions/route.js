@@ -1,3 +1,4 @@
+
 import { NextResponse } from "next/server";
 import { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
@@ -35,7 +36,8 @@ function permissionError(error) {
 // ======================================================
 // GET
 // Load approved Purchase Requisition items that have
-// not already been converted into Procurement Requisitions.
+// not already been converted into Procurement Requisitions
+// or RFQs.
 // ======================================================
 
 export async function GET() {
@@ -58,22 +60,19 @@ export async function GET() {
             );
         }
 
-        // Correct argument order:
-        // hasPermission(roleId, permissionKey, action)
         const [canCreate, canCreateRFQ] = await Promise.all([
-    hasPermission(
-        user.roleId,
-        "procurement_requisitions",
-        "create"
-    ),
-    hasPermission(
-        user.roleId,
-        "rfqs",
-        "create"
-    ),
-]);
+            hasPermission(
+                user.roleId,
+                "procurement_requisitions",
+                "create"
+            ),
+            hasPermission(
+                user.roleId,
+                "rfqs",
+                "create"
+            ),
+        ]);
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
 
         const result = await db.query(
@@ -118,28 +117,35 @@ export async function GET() {
             INNER JOIN purchase_requisitions pr
                 ON pr.requisition_id = ri.requisition_id
 
-            LEFT JOIN products p
+            INNER JOIN products p
                 ON p.product_id = ri.product_id
 
-            LEFT JOIN warehouses w
+            INNER JOIN warehouses w
                 ON w.warehouse_id = pr.warehouse_id
 
             WHERE pr.company_id = $1
               AND pr.status = 'APPROVED'
+              AND pr.deleted_at IS NULL
+
+              AND p.is_active = TRUE
+              AND p.deleted_at IS NULL
+
+              AND w.is_active = TRUE
+              AND w.deleted_at IS NULL
 
               AND NOT EXISTS (
-    SELECT 1
-    FROM procurement_requisition_items pri
-    WHERE pri.source_requisition_item_id =
-          ri.requisition_item_id
-)
+                    SELECT 1
+                    FROM procurement_requisition_items pri
+                    WHERE pri.source_requisition_item_id =
+                        ri.requisition_item_id
+              )
 
-AND NOT EXISTS (
-    SELECT 1
-    FROM rfq_items rfi
-    WHERE rfi.source_requisition_item_id =
-          ri.requisition_item_id
-)
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM rfq_items rfi
+                    WHERE rfi.source_requisition_item_id =
+                        ri.requisition_item_id
+              )
 
             ORDER BY
                 pr.transaction_date DESC,
@@ -153,10 +159,11 @@ AND NOT EXISTS (
             success: true,
             rows: result.rows,
             permissions: {
-    canCreate,
-    canCreateRFQ,
-},
+                canCreate,
+                canCreateRFQ,
+            },
         });
+
     } catch (error) {
         const response = permissionError(error);
 
@@ -206,7 +213,6 @@ export async function POST(request) {
             );
         }
 
-        // Parse request body.
         let body;
 
         try {
@@ -236,7 +242,6 @@ export async function POST(request) {
             );
         }
 
-        // Normalize IDs and remove duplicates.
         const ids = [
             ...new Set(selectedItemIds.map(Number)),
         ];
@@ -257,17 +262,19 @@ export async function POST(request) {
             );
         }
 
-        // Acquire database connection after validation.
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
         client = await db.connect();
 
         await client.query("BEGIN");
         transactionStarted = true;
 
-        // Lock the selected source rows and requisition headers.
-        // Check the Procurement Requisition items table to prevent
-        // converting an item that has already been converted.
+        /*
+         * Lock the selected source items, their requisition
+         * headers, products, and warehouses.
+         *
+         * This prevents conversion from proceeding against
+         * archived source records or inactive master records.
+         */
         const sourceResult = await client.query(
             `
             SELECT
@@ -283,39 +290,56 @@ export async function POST(request) {
                 pr.warehouse_id,
                 pr.transaction_number,
                 pr.company_id,
-                pr.status
+                pr.status,
+
+                p.product_name,
+                p.sku,
+
+                w.warehouse_name
 
             FROM purchase_requisition_items ri
 
             INNER JOIN purchase_requisitions pr
                 ON pr.requisition_id = ri.requisition_id
 
+            INNER JOIN products p
+                ON p.product_id = ri.product_id
+
+            INNER JOIN warehouses w
+                ON w.warehouse_id = pr.warehouse_id
+
             WHERE ri.requisition_item_id = ANY($1::INTEGER[])
               AND pr.company_id = $2
               AND pr.status = 'APPROVED'
+              AND pr.deleted_at IS NULL
+
+              AND p.is_active = TRUE
+              AND p.deleted_at IS NULL
+
+              AND w.is_active = TRUE
+              AND w.deleted_at IS NULL
 
               AND NOT EXISTS (
-    SELECT 1
-    FROM procurement_requisition_items pri
-    WHERE pri.source_requisition_item_id =
-          ri.requisition_item_id
-)
+                    SELECT 1
+                    FROM procurement_requisition_items pri
+                    WHERE pri.source_requisition_item_id =
+                        ri.requisition_item_id
+              )
 
-AND NOT EXISTS (
-    SELECT 1
-    FROM rfq_items rfi
-    WHERE rfi.source_requisition_item_id =
-          ri.requisition_item_id
-)
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM rfq_items rfi
+                    WHERE rfi.source_requisition_item_id =
+                        ri.requisition_item_id
+              )
 
             ORDER BY ri.requisition_item_id
 
-            FOR UPDATE OF ri, pr
+            FOR UPDATE OF ri, pr, p, w
             `,
             [ids, user.companyId]
         );
 
-        // Every selected item must still be available.
         if (sourceResult.rows.length !== ids.length) {
             await client.query("ROLLBACK");
             transactionStarted = false;
@@ -324,13 +348,15 @@ AND NOT EXISTS (
                 {
                     success: false,
                     message:
-                        "Some selected items are unavailable, not approved, or already converted. Refresh the list and try again.",
+                        "Some selected items are unavailable, archived, inactive, not approved, or already converted. Refresh the list and try again.",
                 },
                 { status: 409 }
             );
         }
 
-        // Generate Procurement Requisition number.
+        /*
+         * Generate Procurement Requisition number.
+         */
         const numberResult = await client.query(
             `
             SELECT
@@ -348,7 +374,9 @@ AND NOT EXISTS (
         const transactionNumber =
             numberResult.rows[0].transaction_number;
 
-        // Create ONE Procurement Requisition header.
+        /*
+         * Create ONE Procurement Requisition header.
+         */
         const headerResult = await client.query(
             `
             INSERT INTO procurement_requisitions (
@@ -378,7 +406,10 @@ AND NOT EXISTS (
 
         const procurement = headerResult.rows[0];
 
-        // Insert every selected source item into the same header.
+        /*
+         * Insert every selected source item into the same header.
+         * Source IDs are retained for traceability and RFQ flow.
+         */
         for (const item of sourceResult.rows) {
             await client.query(
                 `
@@ -414,7 +445,6 @@ AND NOT EXISTS (
             );
         }
 
-        // Commit only after the header and all items are inserted.
         await client.query("COMMIT");
         transactionStarted = false;
 
@@ -433,6 +463,7 @@ AND NOT EXISTS (
             },
             { status: 201 }
         );
+
     } catch (error) {
         if (client && transactionStarted) {
             try {
@@ -480,14 +511,13 @@ AND NOT EXISTS (
 
         if (
             error.code === "42P01" ||
-            error.code === "42703" ||
-            error.code === "42P sequence"
+            error.code === "42703"
         ) {
             return NextResponse.json(
                 {
                     success: false,
                     message:
-                        "A required Procurement Requisition database table, column, or sequence is missing. Check your database schema.",
+                        "A required Procurement Requisition database table or column is missing. Check your database schema.",
                 },
                 { status: 500 }
             );
@@ -502,6 +532,7 @@ AND NOT EXISTS (
             },
             { status: 500 }
         );
+
     } finally {
         if (client) {
             client.release();

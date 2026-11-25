@@ -40,6 +40,7 @@ import {
   ShieldAlert,
   RefreshCw,
   Grid3X3,
+  Trash2,
 } from "lucide-react";
 
 import { erpModules } from "@/lib/erp-modules";
@@ -121,6 +122,7 @@ const ROUTE_PERMISSION_KEYS = {
   "/dashboard/settings": "settings",
   "/dashboard/register-company": "settings",
   "/dashboard/help-support": "settings",
+  "/dashboard/recycle-bin": "recycle_bin",
 
   // Inventory
   "/dashboard/products": "products",
@@ -238,6 +240,7 @@ const sectionIcons = {
   accounts: BookOpen,
   "financial-reports": Scale,
   "business-reports": BarChart3,
+  "data-management": Trash2,
 };
 
 // =====================================================

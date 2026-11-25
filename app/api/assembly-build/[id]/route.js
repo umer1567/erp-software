@@ -2,6 +2,7 @@
 import { NextResponse } from "next/server";
 import { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
+import { archiveAndSoftDelete } from "@/lib/recycle-bin";
 import { requirePermission } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
@@ -196,6 +197,7 @@ async function getBuild(client, buildId, companyId, lock = false) {
             ON sp.sub_product_id = ab.assembly_sub_product_id
         WHERE ab.assembly_build_id = $1
           AND ab.company_id = $2
+          AND ab.deleted_at IS NULL
         ${lock ? "FOR UPDATE OF ab" : ""}
         `,
         [buildId, companyId]
@@ -242,7 +244,7 @@ async function getItemBalance(client, {
 }
 
 /* =========================================================
-   GET: LOAD ONE ASSEMBLY BUILD
+   GET: LOAD ONE ACTIVE ASSEMBLY BUILD
 ========================================================= */
 
 export async function GET(request, { params }) {
@@ -261,14 +263,9 @@ export async function GET(request, { params }) {
         const buildId = await getBuildId(params);
 
         const db = await getTenantDb(user);
-
         client = await db.connect();
 
-        const build = await getBuild(
-            client,
-            buildId,
-            companyId
-        );
+        const build = await getBuild(client, buildId, companyId);
 
         if (!build) {
             return jsonError("Assembly Build not found.", 404);
@@ -434,7 +431,6 @@ export async function PUT(request, { params }) {
         }
 
         const db = await getTenantDb(user);
-
         client = await db.connect();
 
         await client.query("BEGIN");
@@ -466,7 +462,7 @@ export async function PUT(request, { params }) {
             );
         }
 
-        /* Validate warehouse */
+        /* Validate active production location */
 
         const warehouseResult = await client.query(
             `
@@ -474,6 +470,7 @@ export async function PUT(request, { params }) {
             FROM warehouses
             WHERE warehouse_id = $1
               AND is_active = TRUE
+              AND deleted_at IS NULL
             LIMIT 1
             `,
             [warehouseId]
@@ -481,11 +478,11 @@ export async function PUT(request, { params }) {
 
         if (!warehouseResult.rows.length) {
             throw new Error(
-                "Selected production location is invalid or inactive."
+                "Selected production location is invalid, inactive, or archived."
             );
         }
 
-        /* Validate customer */
+        /* Validate active customer */
 
         if (customerId) {
             const customerResult = await client.query(
@@ -494,6 +491,7 @@ export async function PUT(request, { params }) {
                 FROM customers
                 WHERE customer_id = $1
                   AND is_active = TRUE
+                  AND deleted_at IS NULL
                 LIMIT 1
                 `,
                 [customerId]
@@ -501,12 +499,12 @@ export async function PUT(request, { params }) {
 
             if (!customerResult.rows.length) {
                 throw new Error(
-                    "Selected customer is invalid or inactive."
+                    "Selected customer is invalid, inactive, or archived."
                 );
             }
         }
 
-        /* Validate company-owned BOM and active revision */
+        /* Validate company-owned active BOM and revision */
 
         const bomResult = await client.query(
             `
@@ -523,6 +521,7 @@ export async function PUT(request, { params }) {
                 ON br.bom_id = b.bom_id
             WHERE b.bom_id = $1
               AND b.company_id = $2
+              AND b.deleted_at IS NULL
               AND br.revision_id = $3
               AND br.is_active = TRUE
             LIMIT 1
@@ -532,7 +531,7 @@ export async function PUT(request, { params }) {
 
         if (!bomResult.rows.length) {
             throw new Error(
-                "Selected BOM or revision is invalid, inactive, or does not belong to your company."
+                "Selected BOM or revision is invalid, inactive, archived, or does not belong to your company."
             );
         }
 
@@ -564,6 +563,8 @@ export async function PUT(request, { params }) {
                 bc.bom_quantity,
                 bc.quantity_type,
                 p.product_name,
+                p.is_active AS product_is_active,
+                p.deleted_at AS product_deleted_at,
                 sp.sub_product_name
             FROM bom_revision_components bc
             LEFT JOIN products p
@@ -634,8 +635,7 @@ export async function PUT(request, { params }) {
                     Number(bomComponent.bom_quantity) * buildQuantity;
 
                 if (
-                    Math.abs(requiredQuantity - expectedQuantity) >
-                    1
+                    Math.abs(requiredQuantity - expectedQuantity) > 1
                 ) {
                     throw new Error(
                         `Required quantity for component ${componentId} does not match the BOM. Expected ${expectedQuantity}.`
@@ -652,6 +652,25 @@ export async function PUT(request, { params }) {
                 : null;
 
             validateItemIdentity(productId, subProductId);
+
+            if (
+                productId &&
+                (
+                    !bomComponent.product_name ||
+                    bomComponent.product_is_active === false ||
+                    bomComponent.product_deleted_at
+                )
+            ) {
+                throw new Error(
+                    `The product for BOM component ${componentId} is missing, inactive, or archived.`
+                );
+            }
+
+            if (subProductId && !bomComponent.sub_product_name) {
+                throw new Error(
+                    `The sub-product for BOM component ${componentId} could not be found.`
+                );
+            }
 
             const itemBalance = await getItemBalance(client, {
                 companyId,
@@ -733,6 +752,8 @@ export async function PUT(request, { params }) {
                     SELECT product_name
                     FROM products
                     WHERE product_id = $1
+                      AND COALESCE(is_active, TRUE) = TRUE
+                      AND deleted_at IS NULL
                     LIMIT 1
                     `,
                     [productId]
@@ -740,7 +761,7 @@ export async function PUT(request, { params }) {
 
                 if (!itemResult.rows.length) {
                     throw new Error(
-                        "A selected byproduct product does not exist."
+                        "A selected byproduct product does not exist, is inactive, or is archived."
                     );
                 }
 
@@ -839,6 +860,7 @@ export async function PUT(request, { params }) {
                 updated_at = CURRENT_TIMESTAMP
             WHERE assembly_build_id = $20
               AND company_id = $21
+              AND deleted_at IS NULL
               AND status = 'DRAFT'
               AND posted_at IS NULL
             RETURNING *
@@ -880,20 +902,26 @@ export async function PUT(request, { params }) {
         /* Replace child rows atomically */
 
         await client.query(
-            `DELETE FROM assembly_build_components
-             WHERE assembly_build_id = $1`,
+            `
+            DELETE FROM assembly_build_components
+            WHERE assembly_build_id = $1
+            `,
             [buildId]
         );
 
         await client.query(
-            `DELETE FROM assembly_build_byproducts
-             WHERE assembly_build_id = $1`,
+            `
+            DELETE FROM assembly_build_byproducts
+            WHERE assembly_build_id = $1
+            `,
             [buildId]
         );
 
         await client.query(
-            `DELETE FROM assembly_build_downtime
-             WHERE assembly_build_id = $1`,
+            `
+            DELETE FROM assembly_build_downtime
+            WHERE assembly_build_id = $1
+            `,
             [buildId]
         );
 
@@ -1032,13 +1060,10 @@ export async function PUT(request, { params }) {
 }
 
 /* =========================================================
-   DELETE: DELETE DRAFT ASSEMBLY BUILD
+   DELETE: ARCHIVE DRAFT ASSEMBLY BUILD
 ========================================================= */
 
 export async function DELETE(request, { params }) {
-    let client;
-    let transactionStarted = false;
-
     try {
         const user = await getCurrentUser();
 
@@ -1050,106 +1075,47 @@ export async function DELETE(request, { params }) {
 
         const companyId = positiveId(user.companyId, "Company");
         const buildId = await getBuildId(params);
-
         const db = await getTenantDb(user);
 
-        client = await db.connect();
+        const result = await archiveAndSoftDelete(
+            { user, db, companyId },
+            {
+                moduleKey: "assembly_build",
+                recordId: buildId,
+                deletionReason: "Assembly Build archived by user.",
+                validateRecord: async (client, record) => {
+                    if (
+                        record.status !== "DRAFT" ||
+                        record.posted_at
+                    ) {
+                        return {
+                            status: 409,
+                            message:
+                                "Only unposted DRAFT Assembly Builds can be archived.",
+                        };
+                    }
 
-        await client.query("BEGIN");
-        transactionStarted = true;
-
-        const existingBuild = await getBuild(
-            client,
-            buildId,
-            companyId,
-            true
+                    return null;
+                },
+            }
         );
-
-        if (!existingBuild) {
-            throw Object.assign(
-                new Error("Assembly Build not found."),
-                { status: 404 }
-            );
-        }
-
-        if (
-            existingBuild.status !== "DRAFT" ||
-            existingBuild.posted_at
-        ) {
-            throw Object.assign(
-                new Error(
-                    "Only unposted DRAFT Assembly Builds can be deleted."
-                ),
-                { status: 409 }
-            );
-        }
-
-        await client.query(
-            `DELETE FROM assembly_build_components
-             WHERE assembly_build_id = $1`,
-            [buildId]
-        );
-
-        await client.query(
-            `DELETE FROM assembly_build_byproducts
-             WHERE assembly_build_id = $1`,
-            [buildId]
-        );
-
-        await client.query(
-            `DELETE FROM assembly_build_downtime
-             WHERE assembly_build_id = $1`,
-            [buildId]
-        );
-
-        const deleteResult = await client.query(
-            `
-            DELETE FROM assembly_builds
-            WHERE assembly_build_id = $1
-              AND company_id = $2
-              AND status = 'DRAFT'
-              AND posted_at IS NULL
-            RETURNING assembly_build_id
-            `,
-            [buildId, companyId]
-        );
-
-        if (!deleteResult.rows.length) {
-            throw Object.assign(
-                new Error("Assembly Build could not be deleted."),
-                { status: 409 }
-            );
-        }
-
-        await client.query("COMMIT");
-        transactionStarted = false;
 
         return NextResponse.json(
             {
                 success: true,
-                message: "Draft Assembly Build deleted successfully.",
+                message:
+                    result.message ||
+                    "Assembly Build archived successfully.",
+                archiveId: result.archiveId,
             },
             { headers: NO_CACHE }
         );
     } catch (error) {
-        if (client && transactionStarted) {
-            try {
-                await client.query("ROLLBACK");
-            } catch (rollbackError) {
-                console.error(
-                    "ASSEMBLY BUILD DELETE ROLLBACK ERROR:",
-                    rollbackError
-                );
-            }
-        }
-
-        console.error("ASSEMBLY BUILD DELETE ERROR:", error);
+        console.error("ASSEMBLY BUILD ARCHIVE ERROR:", error);
 
         return jsonError(
-            error.message || "Failed to delete Assembly Build.",
+            error.message || "Failed to archive Assembly Build.",
             errorStatus(error)
         );
-    } finally {
-        client?.release();
     }
 }

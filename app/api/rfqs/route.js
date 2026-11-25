@@ -1,3 +1,4 @@
+
 import { NextResponse } from "next/server";
 import pool, { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
@@ -25,27 +26,17 @@ const ALLOWED_STATUSES = [
     "CANCELLED",
 ];
 
-/* -------------------------------------------------------------------------- */
-/* Error handling                                                             */
-/* -------------------------------------------------------------------------- */
-
 function getErrorStatus(error) {
     if (error.message === "UNAUTHORIZED") return 401;
     if (error.message === "FORBIDDEN") return 403;
-
     if (error.statusCode) return error.statusCode;
-
     if (error.code === "23505") return 409;
-    if (error.code === "23503") return 400;
-    if (error.code === "23514") return 400;
-
+    if (error.code === "23503" || error.code === "23514") return 400;
     return 500;
 }
 
 function getErrorMessage(error) {
-    if (error.message === "UNAUTHORIZED") {
-        return "Please log in.";
-    }
+    if (error.message === "UNAUTHORIZED") return "Please log in.";
 
     if (error.message === "FORBIDDEN") {
         return "You do not have permission to perform this action.";
@@ -71,10 +62,6 @@ function validationError(message) {
     error.statusCode = 400;
     return error;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Normalize frontend selections                                              */
-/* -------------------------------------------------------------------------- */
 
 function normalizeSelectedItems(body) {
     if (Array.isArray(body.selectedItems)) {
@@ -113,7 +100,6 @@ function normalizeSelectedItems(body) {
         });
     }
 
-    /* Backward compatibility with the older frontend. */
     if (Array.isArray(body.selectedItemIds)) {
         return body.selectedItemIds.map((id) => ({
             sourceType: SOURCE_PURCHASE,
@@ -127,9 +113,7 @@ function normalizeSelectedItems(body) {
 
 function validateSelections(items) {
     if (!items.length) {
-        throw validationError(
-            "Please select at least one RFQ item."
-        );
+        throw validationError("Please select at least one RFQ item.");
     }
 
     const seen = new Set();
@@ -139,48 +123,34 @@ function validateSelections(items) {
             throw validationError("Invalid RFQ source type.");
         }
 
-        if (
-            !Number.isSafeInteger(item.itemId) ||
-            item.itemId <= 0
-        ) {
+        if (!Number.isSafeInteger(item.itemId) || item.itemId <= 0) {
             throw validationError("Invalid selected item.");
         }
 
-        if (item.sourceType === SOURCE_DIRECT) {
-            if (
-                !Number.isFinite(item.quantity) ||
-                item.quantity <= 0
-            ) {
-                throw validationError(
-                    "Please enter a valid quantity greater than zero for every direct purchase item."
-                );
-            }
+        if (
+            item.sourceType === SOURCE_DIRECT &&
+            (!Number.isFinite(item.quantity) || item.quantity <= 0)
+        ) {
+            throw validationError(
+                "Please enter a valid quantity greater than zero for every direct purchase item."
+            );
         }
 
         const key = `${item.sourceType}:${item.itemId}`;
 
         if (seen.has(key)) {
-            throw validationError(
-                "A selected item appears more than once."
-            );
+            throw validationError("A selected item appears more than once.");
         }
 
         seen.add(key);
     }
 
-    /*
-     * The same original PR item cannot be selected through both
-     * the Purchase Requisition and Procurement workflows.
-     *
-     * Direct product IDs are intentionally excluded from this check.
-     */
-    const requisitionItems = items.filter(
+    // An original PR item cannot be selected through both workflows.
+    const sourceItems = items.filter(
         (item) => item.sourceType !== SOURCE_DIRECT
     );
 
-    const originalIds = requisitionItems.map(
-        (item) => item.itemId
-    );
+    const originalIds = sourceItems.map((item) => item.itemId);
 
     if (new Set(originalIds).size !== originalIds.length) {
         throw validationError(
@@ -192,7 +162,7 @@ function validateSelections(items) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* GET: RFQ history, suppliers, and available items                           */
+/* GET: RFQ history, suppliers, and available source items                    */
 /* -------------------------------------------------------------------------- */
 
 export async function GET() {
@@ -203,30 +173,24 @@ export async function GET() {
 
         if (!user.companyId) {
             return NextResponse.json(
-                {
-                    message: "No company is assigned to your account.",
-                },
+                { message: "No company is assigned to your account." },
                 { status: 400 }
             );
         }
 
         const companyId = Number(user.companyId);
-
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
 
         const [
             historyResult,
             suppliersResult,
-            directItemsResult,
+            purchaseItemsResult,
             procurementItemsResult,
             productsResult,
             companyResult,
         ] = await Promise.all([
-            /* ---------------------------------------------------------------- */
-            /* RFQ history                                                      */
-            /* ---------------------------------------------------------------- */
-
+            // Archived RFQs are excluded from normal history.
+            // Historical supplier and warehouse information is retained.
             db.query(
                 `
                 SELECT
@@ -239,39 +203,29 @@ export async function GET() {
                     r.memo,
                     r.created_at,
 
-                    COUNT(DISTINCT i.rfq_item_id)::INTEGER
-                        AS item_count,
-
-                    COUNT(DISTINCT v.rfq_vendor_id)::INTEGER
-                        AS vendor_count,
+                    COUNT(DISTINCT i.rfq_item_id)::INTEGER AS item_count,
+                    COUNT(DISTINCT v.rfq_vendor_id)::INTEGER AS vendor_count,
 
                     COALESCE(
-                        STRING_AGG(
-                            DISTINCT w.warehouse_name,
-                            ', '
-                        ),
+                        STRING_AGG(DISTINCT w.warehouse_name, ', '),
                         ''
                     ) AS location,
 
                     CASE
                         WHEN COUNT(DISTINCT i.source_type) > 1
                             THEN 'Multiple Sources'
-
                         WHEN COUNT(DISTINCT i.source_type) FILTER (
                             WHERE i.source_type = '${SOURCE_DIRECT}'
                         ) > 0
                             THEN 'Direct Purchase'
-
                         WHEN COUNT(DISTINCT i.source_type) FILTER (
                             WHERE i.source_type = '${SOURCE_PROCUREMENT}'
                         ) > 0
                             THEN 'Requisition for Procurement'
-
                         WHEN COUNT(DISTINCT i.source_type) FILTER (
                             WHERE i.source_type = '${SOURCE_PURCHASE}'
                         ) > 0
                             THEN 'Purchase Requisition'
-
                         ELSE '—'
                     END AS created_from,
 
@@ -282,9 +236,7 @@ export async function GET() {
                                 'supplier_name', s.supplier_name,
                                 'supplier_code', s.supplier_code
                             )
-                        ) FILTER (
-                            WHERE s.supplier_id IS NOT NULL
-                        ),
+                        ) FILTER (WHERE s.supplier_id IS NOT NULL),
                         '[]'::json
                     ) AS vendors
 
@@ -302,19 +254,17 @@ export async function GET() {
                 LEFT JOIN suppliers s
                     ON s.supplier_id = v.supplier_id
 
-                WHERE r.company_id = $1
+                WHERE
+                    r.company_id = $1
+                    AND r.deleted_at IS NULL
 
                 GROUP BY r.rfq_id
-
                 ORDER BY r.rfq_id DESC
                 `,
                 [companyId]
             ),
 
-            /* ---------------------------------------------------------------- */
-            /* Active suppliers                                                 */
-            /* ---------------------------------------------------------------- */
-
+            // Only active, non-archived suppliers are selectable.
             db.query(
                 `
                 SELECT
@@ -326,31 +276,24 @@ export async function GET() {
                     address
                 FROM suppliers
                 WHERE is_active = TRUE
+                  AND deleted_at IS NULL
                 ORDER BY supplier_name
                 `
             ),
 
-            /* ---------------------------------------------------------------- */
-            /* Purchase Requisition items                                       */
-            /* ---------------------------------------------------------------- */
-
+            // Approved Purchase Requisition items.
             db.query(
                 `
                 SELECT
                     '${SOURCE_PURCHASE}'::VARCHAR AS source_type,
 
                     ri.requisition_item_id AS seq_id,
-
                     pr.requisition_id,
 
-                    ri.requisition_item_id
-                        AS source_requisition_item_id,
+                    ri.requisition_item_id AS source_requisition_item_id,
 
-                    NULL::INTEGER
-                        AS procurement_requisition_id,
-
-                    NULL::INTEGER
-                        AS procurement_requisition_item_id,
+                    NULL::INTEGER AS procurement_requisition_id,
+                    NULL::INTEGER AS procurement_requisition_item_id,
 
                     pr.transaction_number AS req_number,
                     pr.transaction_date AS req_date,
@@ -362,11 +305,11 @@ export async function GET() {
                     ri.uom,
                     ri.quantity,
 
-                    pr.department AS department,
-                    pr.class_name AS class_name,
-                    pr.project AS project,
-                    pr.reference_number AS reference_number,
-                    pr.warehouse_id AS warehouse_id,
+                    pr.department,
+                    pr.class_name,
+                    pr.project,
+                    pr.reference_number,
+                    pr.warehouse_id,
 
                     w.warehouse_name AS location
 
@@ -381,23 +324,31 @@ export async function GET() {
                 LEFT JOIN warehouses w
                     ON w.warehouse_id = pr.warehouse_id
 
-                WHERE
-                    pr.company_id = $1
-                    AND pr.status = 'APPROVED'
+                WHERE pr.company_id = $1
+                  AND pr.status = 'APPROVED'
+                  AND pr.deleted_at IS NULL
 
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM procurement_requisition_items pri
-                        WHERE pri.source_requisition_item_id =
-                            ri.requisition_item_id
-                    )
+                  AND (
+                      ri.product_id IS NULL
+                      OR (
+                          p.is_active = TRUE
+                          AND p.deleted_at IS NULL
+                      )
+                  )
 
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM rfq_items rfi
-                        WHERE rfi.source_requisition_item_id =
-                            ri.requisition_item_id
-                    )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM procurement_requisition_items pri
+                      WHERE pri.source_requisition_item_id =
+                          ri.requisition_item_id
+                  )
+
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM rfq_items rfi
+                      WHERE rfi.source_requisition_item_id =
+                          ri.requisition_item_id
+                  )
 
                 ORDER BY
                     pr.transaction_date DESC,
@@ -406,33 +357,24 @@ export async function GET() {
                 [companyId]
             ),
 
-            /* ---------------------------------------------------------------- */
-            /* Procurement Requisition items                                   */
-            /* ---------------------------------------------------------------- */
-
+            // Procurement Requisition items.
             db.query(
                 `
                 SELECT
                     '${SOURCE_PROCUREMENT}'::VARCHAR AS source_type,
 
                     pri.source_requisition_item_id AS seq_id,
-
                     pri.source_requisition_id AS requisition_id,
-
                     pri.source_requisition_item_id,
 
                     pro.procurement_requisition_id,
-
                     pri.procurement_requisition_item_id,
 
                     pr.transaction_number AS req_number,
                     pr.transaction_date AS req_date,
 
-                    pro.transaction_number
-                        AS source_transaction_number,
-
-                    pro.transaction_date
-                        AS source_transaction_date,
+                    pro.transaction_number AS source_transaction_number,
+                    pro.transaction_date AS source_transaction_date,
 
                     p.product_name AS item,
 
@@ -446,15 +388,8 @@ export async function GET() {
                     pri.uom,
                     pri.quantity,
 
-                    COALESCE(
-                        pri.department,
-                        pr.department
-                    ) AS department,
-
-                    COALESCE(
-                        pri.class_name,
-                        pr.class_name
-                    ) AS class_name,
+                    COALESCE(pri.department, pr.department) AS department,
+                    COALESCE(pri.class_name, pr.class_name) AS class_name,
 
                     pr.project,
                     pr.reference_number,
@@ -473,8 +408,7 @@ export async function GET() {
                         pri.procurement_requisition_id
 
                 INNER JOIN purchase_requisitions pr
-                    ON pr.requisition_id =
-                        pri.source_requisition_id
+                    ON pr.requisition_id = pri.source_requisition_id
 
                 INNER JOIN purchase_requisition_items ori
                     ON ori.requisition_item_id =
@@ -489,21 +423,31 @@ export async function GET() {
                         pr.warehouse_id
                     )
 
-                WHERE
-                    pro.company_id = $1
-                    AND pro.status = 'CREATED'
-                    AND pr.status = 'APPROVED'
+                WHERE pro.company_id = $1
+                  AND pro.status = 'CREATED'
+                  AND pro.deleted_at IS NULL
 
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM rfq_items rfi
-                        WHERE
-                            rfi.source_requisition_item_id =
-                                pri.source_requisition_item_id
-                            OR
-                            rfi.procurement_requisition_item_id =
-                                pri.procurement_requisition_item_id
-                    )
+                  AND pr.status = 'APPROVED'
+                  AND pr.deleted_at IS NULL
+
+                  AND (
+                      pri.product_id IS NULL
+                      OR (
+                          p.is_active = TRUE
+                          AND p.deleted_at IS NULL
+                      )
+                  )
+
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM rfq_items rfi
+                      WHERE
+                          rfi.source_requisition_item_id =
+                              pri.source_requisition_item_id
+                          OR
+                          rfi.procurement_requisition_item_id =
+                              pri.procurement_requisition_item_id
+                  )
 
                 ORDER BY
                     pro.transaction_date DESC,
@@ -512,17 +456,13 @@ export async function GET() {
                 [companyId]
             ),
 
-            /* ---------------------------------------------------------------- */
-            /* Direct Purchase: active product master                          */
-            /* ---------------------------------------------------------------- */
-
+            // Direct Purchase: active, non-archived products only.
             db.query(
                 `
                 SELECT
                     '${SOURCE_DIRECT}'::VARCHAR AS source_type,
 
                     p.product_id,
-
                     p.product_id AS seq_id,
 
                     p.sku,
@@ -555,15 +495,13 @@ export async function GET() {
                 FROM products p
 
                 WHERE p.is_active = TRUE
+                  AND p.deleted_at IS NULL
 
                 ORDER BY p.product_name
                 `
             ),
 
-            /* ---------------------------------------------------------------- */
-            /* Company details                                                 */
-            /* ---------------------------------------------------------------- */
-
+            // Company details remain in the central database.
             pool.query(
                 `
                 SELECT *
@@ -575,11 +513,7 @@ export async function GET() {
             ),
         ]);
 
-        /* ------------------------------------------------------------------ */
-        /* Format Purchase Requisition items                                  */
-        /* ------------------------------------------------------------------ */
-
-        const availableItems = directItemsResult.rows.map((item) => ({
+        const availableItems = purchaseItemsResult.rows.map((item) => ({
             ...item,
             source_type: SOURCE_PURCHASE,
             source_label: "Purchase Requisition",
@@ -588,26 +522,14 @@ export async function GET() {
             source_item_id: item.source_requisition_item_id,
         }));
 
-        /* ------------------------------------------------------------------ */
-        /* Format Procurement Requisition items                               */
-        /* ------------------------------------------------------------------ */
-
-        const procurementItems = procurementItemsResult.rows.map(
-            (item) => ({
-                ...item,
-                source_type: SOURCE_PROCUREMENT,
-                source_label: "Requisition for Procurement",
-                source_document_number:
-                    item.source_transaction_number,
-                source_document_date:
-                    item.source_transaction_date,
-                source_item_id: item.source_requisition_item_id,
-            })
-        );
-
-        /* ------------------------------------------------------------------ */
-        /* Format Direct Purchase products                                    */
-        /* ------------------------------------------------------------------ */
+        const procurementItems = procurementItemsResult.rows.map((item) => ({
+            ...item,
+            source_type: SOURCE_PROCUREMENT,
+            source_label: "Requisition for Procurement",
+            source_document_number: item.source_transaction_number,
+            source_document_date: item.source_transaction_date,
+            source_item_id: item.source_requisition_item_id,
+        }));
 
         const directProducts = productsResult.rows.map((product) => ({
             ...product,
@@ -625,15 +547,7 @@ export async function GET() {
             companyName: companyRow.company_name || "",
         };
 
-        /* ------------------------------------------------------------------ */
-        /* Permission flags                                                   */
-        /* ------------------------------------------------------------------ */
-
-        const [
-            canCreate,
-            canUpdate,
-            canDelete,
-        ] = await Promise.all([
+        const [canCreate, canUpdate, canDelete] = await Promise.all([
             hasPermission(user.roleId, "rfqs", "create"),
             hasPermission(user.roleId, "rfqs", "update"),
             hasPermission(user.roleId, "rfqs", "delete"),
@@ -641,18 +555,11 @@ export async function GET() {
 
         return NextResponse.json({
             rfqs: historyResult.rows,
-
             suppliers: suppliersResult.rows,
-
             availableItems,
-
             procurementItems,
-
-            // Active products for Direct Purchase Quotation.
             directProducts,
-
             company: companyData,
-
             permissions: {
                 canCreate,
                 canUpdate,
@@ -663,23 +570,18 @@ export async function GET() {
         console.error("GET /api/rfqs error:", error);
 
         return NextResponse.json(
-            {
-                message: getErrorMessage(error),
-            },
-            {
-                status: getErrorStatus(error),
-            }
+            { message: getErrorMessage(error) },
+            { status: getErrorStatus(error) }
         );
     }
 }
 
 /* -------------------------------------------------------------------------- */
-/* POST: Create RFQ from PR, Procurement, Direct Purchase, or a combination   */
+/* POST: Create RFQ from Purchase, Procurement, Direct, or mixed sources      */
 /* -------------------------------------------------------------------------- */
 
 export async function POST(request) {
     let client;
-
     let transactionStarted = false;
 
     try {
@@ -689,9 +591,7 @@ export async function POST(request) {
 
         if (!user.companyId) {
             return NextResponse.json(
-                {
-                    message: "No company is assigned to your account.",
-                },
+                { message: "No company is assigned to your account." },
                 { status: 400 }
             );
         }
@@ -703,21 +603,10 @@ export async function POST(request) {
 
         const transactionDate = body.transactionDate;
 
-        const status = String(
-            body.status || "DRAFT"
-        ).toUpperCase();
-
-        const project = String(
-            body.project || ""
-        ).trim();
-
-        const referenceNumber = String(
-            body.referenceNumber || ""
-        ).trim();
-
-        const memo = String(
-            body.memo || ""
-        ).trim();
+        const status = String(body.status || "DRAFT").toUpperCase();
+        const project = String(body.project || "").trim();
+        const referenceNumber = String(body.referenceNumber || "").trim();
+        const memo = String(body.memo || "").trim();
 
         const selectedItems = validateSelections(
             normalizeSelectedItems(body)
@@ -725,24 +614,16 @@ export async function POST(request) {
 
         const supplierIds = [
             ...new Set(
-                (
-                    Array.isArray(body.supplierIds)
-                        ? body.supplierIds
-                        : []
-                )
+                (Array.isArray(body.supplierIds) ? body.supplierIds : [])
                     .map(Number)
                     .filter(
-                        (id) =>
-                            Number.isSafeInteger(id) &&
-                            id > 0
+                        (id) => Number.isSafeInteger(id) && id > 0
                     )
             ),
         ];
 
         if (!transactionDate) {
-            throw validationError(
-                "Please select a transaction date."
-            );
+            throw validationError("Please select a transaction date.");
         }
 
         if (!ALLOWED_STATUSES.includes(status)) {
@@ -750,22 +631,16 @@ export async function POST(request) {
         }
 
         if (!supplierIds.length) {
-            throw validationError(
-                "Please select at least one supplier."
-            );
+            throw validationError("Please select at least one supplier.");
         }
 
-        // Operational data lives in the company's own database.
         const db = await getTenantDb(user);
         client = await db.connect();
 
         await client.query("BEGIN");
         transactionStarted = true;
 
-        /* ------------------------------------------------------------------ */
-        /* Serialize RFQ number generation for this company                   */
-        /* ------------------------------------------------------------------ */
-
+        // Serialize RFQ number generation for this company.
         await client.query(
             `
             SELECT pg_advisory_xact_lock(
@@ -776,30 +651,24 @@ export async function POST(request) {
             [companyId, 741205]
         );
 
-        /* ------------------------------------------------------------------ */
-        /* Validate suppliers                                                 */
-        /* ------------------------------------------------------------------ */
-
+        // Suppliers must still be active and not archived.
         const supplierCheck = await client.query(
             `
             SELECT supplier_id
             FROM suppliers
-            WHERE
-                supplier_id = ANY($1::INTEGER[])
-                AND is_active = TRUE
+            WHERE supplier_id = ANY($1::INTEGER[])
+              AND is_active = TRUE
+              AND deleted_at IS NULL
+            FOR UPDATE
             `,
             [supplierIds]
         );
 
         if (supplierCheck.rows.length !== supplierIds.length) {
             throw validationError(
-                "One or more selected suppliers are invalid or inactive."
+                "One or more selected suppliers are invalid, inactive, or archived."
             );
         }
-
-        /* ------------------------------------------------------------------ */
-        /* Separate source selections                                         */
-        /* ------------------------------------------------------------------ */
 
         const purchaseSelections = selectedItems.filter(
             (item) => item.sourceType === SOURCE_PURCHASE
@@ -820,53 +689,57 @@ export async function POST(request) {
         /* ------------------------------------------------------------------ */
 
         if (purchaseSelections.length) {
-            const ids = purchaseSelections.map(
-                (item) => item.itemId
-            );
+            const ids = purchaseSelections.map((item) => item.itemId);
 
             const result = await client.query(
                 `
                 SELECT
-                    ri.requisition_item_id
-                        AS source_requisition_item_id,
-
-                    ri.requisition_id
-                        AS source_requisition_id,
+                    ri.requisition_item_id AS source_requisition_item_id,
+                    ri.requisition_id AS source_requisition_id,
 
                     ri.product_id,
                     ri.item_description,
                     ri.uom,
                     ri.quantity,
 
-                    pr.department AS department,
-                    pr.class_name AS class_name,
-                    pr.warehouse_id AS warehouse_id
+                    pr.department,
+                    pr.class_name,
+                    pr.warehouse_id
 
                 FROM purchase_requisition_items ri
 
                 INNER JOIN purchase_requisitions pr
                     ON pr.requisition_id = ri.requisition_id
 
-                WHERE
-                    ri.requisition_item_id =
-                        ANY($1::INTEGER[])
+                LEFT JOIN products p
+                    ON p.product_id = ri.product_id
 
-                    AND pr.company_id = $2
-                    AND pr.status = 'APPROVED'
+                WHERE ri.requisition_item_id = ANY($1::INTEGER[])
+                  AND pr.company_id = $2
+                  AND pr.status = 'APPROVED'
+                  AND pr.deleted_at IS NULL
 
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM procurement_requisition_items pri
-                        WHERE pri.source_requisition_item_id =
-                            ri.requisition_item_id
-                    )
+                  AND (
+                      ri.product_id IS NULL
+                      OR (
+                          p.is_active = TRUE
+                          AND p.deleted_at IS NULL
+                      )
+                  )
 
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM rfq_items rfi
-                        WHERE rfi.source_requisition_item_id =
-                            ri.requisition_item_id
-                    )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM procurement_requisition_items pri
+                      WHERE pri.source_requisition_item_id =
+                          ri.requisition_item_id
+                  )
+
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM rfq_items rfi
+                      WHERE rfi.source_requisition_item_id =
+                          ri.requisition_item_id
+                  )
 
                 FOR UPDATE OF ri, pr
                 `,
@@ -875,7 +748,7 @@ export async function POST(request) {
 
             if (result.rows.length !== ids.length) {
                 throw validationError(
-                    "One or more Purchase Requisition items are no longer available. Refresh the page and try again."
+                    "One or more Purchase Requisition items are no longer available, archived, inactive, or already converted. Refresh the page and try again."
                 );
             }
 
@@ -894,25 +767,16 @@ export async function POST(request) {
         /* ------------------------------------------------------------------ */
 
         if (procurementSelections.length) {
-            /*
-             * The frontend sends the original PR item ID as sourceItemId.
-             * Therefore, search by pri.source_requisition_item_id,
-             * NOT pri.procurement_requisition_item_id.
-             */
-
-            const ids = procurementSelections.map(
-                (item) => item.itemId
-            );
+            // The frontend sends the original PR item ID as sourceItemId.
+            const ids = procurementSelections.map((item) => item.itemId);
 
             const result = await client.query(
                 `
                 SELECT
                     pri.procurement_requisition_item_id,
-
                     pri.procurement_requisition_id,
 
                     pri.source_requisition_id,
-
                     pri.source_requisition_item_id,
 
                     pri.product_id,
@@ -947,31 +811,43 @@ export async function POST(request) {
                         pri.procurement_requisition_id
 
                 INNER JOIN purchase_requisitions pr
-                    ON pr.requisition_id =
-                        pri.source_requisition_id
+                    ON pr.requisition_id = pri.source_requisition_id
 
                 INNER JOIN purchase_requisition_items ori
                     ON ori.requisition_item_id =
                         pri.source_requisition_item_id
 
-                WHERE
-                    pri.source_requisition_item_id =
-                        ANY($1::INTEGER[])
+                LEFT JOIN products p
+                    ON p.product_id = pri.product_id
 
-                    AND pro.company_id = $2
-                    AND pro.status = 'CREATED'
-                    AND pr.status = 'APPROVED'
+                WHERE pri.source_requisition_item_id =
+                    ANY($1::INTEGER[])
 
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM rfq_items rfi
-                        WHERE
-                            rfi.source_requisition_item_id =
-                                pri.source_requisition_item_id
-                            OR
-                            rfi.procurement_requisition_item_id =
-                                pri.procurement_requisition_item_id
-                    )
+                  AND pro.company_id = $2
+                  AND pro.status = 'CREATED'
+                  AND pro.deleted_at IS NULL
+
+                  AND pr.status = 'APPROVED'
+                  AND pr.deleted_at IS NULL
+
+                  AND (
+                      pri.product_id IS NULL
+                      OR (
+                          p.is_active = TRUE
+                          AND p.deleted_at IS NULL
+                      )
+                  )
+
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM rfq_items rfi
+                      WHERE
+                          rfi.source_requisition_item_id =
+                              pri.source_requisition_item_id
+                          OR
+                          rfi.procurement_requisition_item_id =
+                              pri.procurement_requisition_item_id
+                  )
 
                 FOR UPDATE OF pri, pro, pr, ori
                 `,
@@ -980,7 +856,7 @@ export async function POST(request) {
 
             if (result.rows.length !== ids.length) {
                 throw validationError(
-                    "One or more Procurement Requisition items are no longer available. Refresh the page and try again."
+                    "One or more Procurement Requisition items are no longer available, archived, inactive, or already converted. Refresh the page and try again."
                 );
             }
 
@@ -1005,7 +881,6 @@ export async function POST(request) {
                 `
                 SELECT
                     p.product_id,
-
                     p.product_name,
 
                     COALESCE(
@@ -1024,9 +899,9 @@ export async function POST(request) {
 
                 FROM products p
 
-                WHERE
-                    p.product_id = ANY($1::INTEGER[])
-                    AND p.is_active = TRUE
+                WHERE p.product_id = ANY($1::INTEGER[])
+                  AND p.is_active = TRUE
+                  AND p.deleted_at IS NULL
 
                 FOR UPDATE OF p
                 `,
@@ -1035,7 +910,7 @@ export async function POST(request) {
 
             if (result.rows.length !== productIds.length) {
                 throw validationError(
-                    "One or more selected products are invalid or inactive. Refresh the page and try again."
+                    "One or more selected products are invalid, inactive, or archived. Refresh the page and try again."
                 );
             }
 
@@ -1050,16 +925,13 @@ export async function POST(request) {
                 ...result.rows.map((product) => ({
                     source_type: SOURCE_DIRECT,
 
-                    // Direct lines must not reference requisitions.
                     source_requisition_id: null,
                     source_requisition_item_id: null,
                     procurement_requisition_id: null,
                     procurement_requisition_item_id: null,
 
                     product_id: product.product_id,
-
                     item_description: product.item_description,
-
                     uom: product.uom,
 
                     quantity: selectedQuantityByProduct.get(
@@ -1083,13 +955,10 @@ export async function POST(request) {
                     line.source_requisition_item_id !== null &&
                     line.source_requisition_item_id !== undefined
             )
-            .map((line) =>
-                Number(line.source_requisition_item_id)
-            );
+            .map((line) => Number(line.source_requisition_item_id));
 
         if (
-            new Set(originalSourceIds).size !==
-            originalSourceIds.length
+            new Set(originalSourceIds).size !== originalSourceIds.length
         ) {
             throw validationError(
                 "The same original Purchase Requisition item cannot be added twice to one RFQ."
@@ -1141,15 +1010,13 @@ export async function POST(request) {
             [companyId]
         );
 
-        const nextNumber = Number(
-            numberResult.rows[0].next_number
-        );
+        const nextNumber = Number(numberResult.rows[0].next_number);
 
         const transactionNumber =
             `RFQ-${String(nextNumber).padStart(6, "0")}`;
 
         /* ------------------------------------------------------------------ */
-        /* Insert RFQ header                                                   */
+        /* Insert RFQ header                                                  */
         /* ------------------------------------------------------------------ */
 
         const headerResult = await client.query(
@@ -1164,9 +1031,7 @@ export async function POST(request) {
                 memo,
                 created_by
             )
-            VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8
-            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *
             `,
             [
@@ -1184,7 +1049,7 @@ export async function POST(request) {
         const rfq = headerResult.rows[0];
 
         /* ------------------------------------------------------------------ */
-        /* Insert invited suppliers                                            */
+        /* Insert invited suppliers                                           */
         /* ------------------------------------------------------------------ */
 
         for (const supplierId of supplierIds) {
@@ -1197,10 +1062,7 @@ export async function POST(request) {
                 )
                 VALUES ($1, $2, 'INVITED')
                 `,
-                [
-                    rfq.rfq_id,
-                    supplierId,
-                ]
+                [rfq.rfq_id, supplierId]
             );
         }
 
@@ -1233,29 +1095,17 @@ export async function POST(request) {
                 `,
                 [
                     rfq.rfq_id,
-
                     line.source_requisition_id,
-
                     line.source_requisition_item_id,
-
                     line.product_id,
-
                     line.item_description,
-
                     line.uom,
-
                     line.quantity,
-
                     line.department,
-
                     line.class_name,
-
                     line.warehouse_id,
-
                     line.source_type,
-
                     line.procurement_requisition_id,
-
                     line.procurement_requisition_item_id,
                 ]
             );
@@ -1282,12 +1132,8 @@ export async function POST(request) {
         console.error("POST /api/rfqs error:", error);
 
         return NextResponse.json(
-            {
-                message: getErrorMessage(error),
-            },
-            {
-                status: getErrorStatus(error),
-            }
+            { message: getErrorMessage(error) },
+            { status: getErrorStatus(error) }
         );
     } finally {
         if (client) {

@@ -1,8 +1,10 @@
+
 import { NextResponse } from "next/server";
 import { getOperationalPool } from "@/lib/db";
 import { authorizeSalesQuotations } from "@/lib/sales-quotations-auth";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 function jsonError(message, status = 400) {
     return NextResponse.json(
@@ -95,19 +97,20 @@ function calculateItems(items) {
         }
 
         const amount = roundMoney(quantity * unitPrice);
-        const taxAmount = roundMoney(amount * taxRate / 100);
+        const taxAmount = roundMoney((amount * taxRate) / 100);
         const grossAmount = roundMoney(amount + taxAmount);
 
         subtotal += amount;
         taxTotal += taxAmount;
 
-        const productId = item.productId
-            ? Number(item.productId)
-            : null;
+        const productId =
+            item.productId === "" || item.productId == null
+                ? null
+                : Number(item.productId);
 
         if (
             productId !== null &&
-            (!Number.isInteger(productId) || productId <= 0)
+            (!Number.isSafeInteger(productId) || productId <= 0)
         ) {
             throw new Error(`Invalid product on line ${index + 1}.`);
         }
@@ -116,10 +119,7 @@ function calculateItems(items) {
             productId,
             itemName,
             itemDescription: cleanText(item.itemDescription, 5000),
-            itemBalance: Math.max(
-                0,
-                numberValue(item.itemBalance, 0)
-            ),
+            itemBalance: Math.max(0, numberValue(item.itemBalance, 0)),
             uom: cleanText(item.uom, 50),
             quantity,
             unitPrice,
@@ -188,6 +188,7 @@ async function insertQuotationItems(client, quotationId, items) {
     }
 }
 
+// GET /api/sales-quotations
 export async function GET(request) {
     try {
         const authorization = await authorizeSalesQuotations("view");
@@ -233,9 +234,12 @@ export async function GET(request) {
             FROM sales_quotations q
             LEFT JOIN customers c
                 ON c.customer_id = q.customer_id
+               AND c.deleted_at IS NULL
             LEFT JOIN warehouses w
                 ON w.warehouse_id = q.warehouse_id
+               AND w.deleted_at IS NULL
             WHERE q.company_id = $1
+              AND q.deleted_at IS NULL
               AND (
                   $2 = ''
                   OR q.quotation_number ILIKE '%' || $2 || '%'
@@ -263,6 +267,7 @@ export async function GET(request) {
     }
 }
 
+// POST /api/sales-quotations
 export async function POST(request) {
     let client;
 
@@ -278,7 +283,9 @@ export async function POST(request) {
 
         const { userId, companyId } = authorization.user;
         const db = await getOperationalPool(companyId);
+
         client = await db.connect();
+
         const body = await request.json();
 
         const quotationDate = validDate(body.quotationDate);
@@ -306,24 +313,26 @@ export async function POST(request) {
             return jsonError("Invalid status for a new quotation.");
         }
 
-        const customerId = body.customerId
-            ? Number(body.customerId)
-            : null;
+        const customerId =
+            body.customerId === "" || body.customerId == null
+                ? null
+                : Number(body.customerId);
 
-        const warehouseId = body.warehouseId
-            ? Number(body.warehouseId)
-            : null;
+        const warehouseId =
+            body.warehouseId === "" || body.warehouseId == null
+                ? null
+                : Number(body.warehouseId);
 
         if (
             customerId !== null &&
-            (!Number.isInteger(customerId) || customerId <= 0)
+            (!Number.isSafeInteger(customerId) || customerId <= 0)
         ) {
             return jsonError("Select a valid customer.");
         }
 
         if (
             warehouseId !== null &&
-            (!Number.isInteger(warehouseId) || warehouseId <= 0)
+            (!Number.isSafeInteger(warehouseId) || warehouseId <= 0)
         ) {
             return jsonError("Select a valid warehouse.");
         }
@@ -332,32 +341,66 @@ export async function POST(request) {
 
         await client.query("BEGIN");
 
-        // Verify referenced records exist before saving.
         if (customerId !== null) {
             const customer = await client.query(
-                `SELECT customer_id
-                 FROM customers
-                 WHERE customer_id = $1
-                   AND is_active = TRUE`,
+                `
+                SELECT customer_id
+                FROM customers
+                WHERE customer_id = $1
+                  AND is_active = TRUE
+                  AND deleted_at IS NULL
+                FOR SHARE
+                `,
                 [customerId]
             );
 
             if (customer.rowCount === 0) {
-                throw new Error("The selected customer is not active or does not exist.");
+                throw new Error(
+                    "The selected customer is not active or does not exist."
+                );
             }
         }
 
         if (warehouseId !== null) {
             const warehouse = await client.query(
-                `SELECT warehouse_id
-                 FROM warehouses
-                 WHERE warehouse_id = $1
-                   AND is_active = TRUE`,
+                `
+                SELECT warehouse_id
+                FROM warehouses
+                WHERE warehouse_id = $1
+                  AND is_active = TRUE
+                  AND deleted_at IS NULL
+                FOR SHARE
+                `,
                 [warehouseId]
             );
 
             if (warehouse.rowCount === 0) {
-                throw new Error("The selected warehouse is not active or does not exist.");
+                throw new Error(
+                    "The selected warehouse is not active or does not exist."
+                );
+            }
+        }
+
+        // Validate selected products. Free-text quotation lines remain supported.
+        for (const item of totals.items) {
+            if (item.productId === null) continue;
+
+            const product = await client.query(
+                `
+                SELECT product_id
+                FROM products
+                WHERE product_id = $1
+                  AND is_active = TRUE
+                  AND deleted_at IS NULL
+                FOR SHARE
+                `,
+                [item.productId]
+            );
+
+            if (product.rowCount === 0) {
+                throw new Error(
+                    `The product "${item.itemName}" is not active or does not exist.`
+                );
             }
         }
 
@@ -461,16 +504,19 @@ export async function POST(request) {
             { status: 201 }
         );
     } catch (error) {
-        await client?.query("ROLLBACK");
+        try {
+            await client?.query("ROLLBACK");
+        } catch {}
 
         console.error("POST sales quotation error:", error);
 
-        const clientError = [
+        const clientErrorPrefixes = [
             "Add at least one transaction line.",
             "Quantity must be greater than zero",
             "Unit price cannot be negative",
             "Tax rate must be between 0 and 100",
             "Item name is required",
+            "Invalid product",
             "Enter a valid quotation date",
             "Enter a valid quotation expiry date",
             "The expiry date cannot be earlier",
@@ -479,7 +525,12 @@ export async function POST(request) {
             "Select a valid warehouse",
             "The selected customer is not active",
             "The selected warehouse is not active",
-        ].some((message) => error.message?.includes(message));
+            "The product ",
+        ];
+
+        const clientError = clientErrorPrefixes.some((message) =>
+            error.message?.startsWith(message)
+        );
 
         return jsonError(
             clientError
