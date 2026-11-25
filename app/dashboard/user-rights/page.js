@@ -419,13 +419,17 @@ export default function UserRightsPage() {
       requestVersionRef.current.set(requestKey, version);
 
       const payload = {
-        roleId: Number(roleIdAtStart),
-        permissionId,
-        canView: updated.can_view,
-        canCreate: updated.can_create,
-        canUpdate: updated.can_update,
-        canDelete: updated.can_delete,
-      };
+  roleId: Number(roleIdAtStart),
+  permissions: [
+    {
+      permissionId,
+      canView: updated.can_view,
+      canCreate: updated.can_create,
+      canUpdate: updated.can_update,
+      canDelete: updated.can_delete,
+    },
+  ],
+};
 
       console.log("[USER RIGHTS] Saving permission:", {
         roleId: roleIdAtStart,
