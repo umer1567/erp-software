@@ -190,6 +190,7 @@ function matchesSearch(record, search) {
         record.module_key,
         record.source_table,
         record.source_record_id,
+        record.deleted_by_name,
         record.deletion_reason,
     ].some((value) =>
         String(value ?? "").toLowerCase().includes(search)
@@ -219,6 +220,7 @@ function sortArchiveRecords(records) {
 /* Tenant archive records                                                     */
 /* -------------------------------------------------------------------------- */
 
+
 async function getTenantArchiveRecords(
     tenant,
     companyId,
@@ -226,6 +228,10 @@ async function getTenantArchiveRecords(
 ) {
     if (moduleKey && CENTRAL_MODULES.has(moduleKey)) {
         return [];
+    }
+
+    if (!tenant?.db || typeof tenant.db.query !== "function") {
+        throw new Error("Company database connection is unavailable.");
     }
 
     const values = [companyId];
@@ -236,6 +242,7 @@ async function getTenantArchiveRecords(
         moduleCondition = `AND module_key = $${values.length}`;
     }
 
+    // Module archive records are stored in the current company database.
     const result = await tenant.db.query(
         `
         SELECT
@@ -256,15 +263,46 @@ async function getTenantArchiveRecords(
         values
     );
 
+    // User accounts remain central, so resolve their names separately.
+    const deletedByIds = [
+        ...new Set(
+            result.rows
+                .map((record) => Number(record.deleted_by))
+                .filter((id) => Number.isSafeInteger(id) && id > 0)
+        ),
+    ];
+
+    const userNames = new Map();
+
+    if (deletedByIds.length > 0) {
+        const usersResult = await pool.query(
+            `
+            SELECT user_id, full_name
+            FROM public.users
+            WHERE user_id = ANY($1::int[])
+            `,
+            [deletedByIds]
+        );
+
+        for (const user of usersResult.rows) {
+            userNames.set(Number(user.user_id), user.full_name);
+        }
+    }
+
     return result.rows.map((record) => ({
         ...record,
         recycle_bin_id: Number(record.recycle_bin_id),
         company_id: Number(record.company_id),
         source_record_id: String(record.source_record_id),
+        deleted_by: record.deleted_by
+            ? Number(record.deleted_by)
+            : null,
+        deleted_by_name: record.deleted_by
+            ? userNames.get(Number(record.deleted_by)) || null
+            : null,
         archive_source: "tenant",
     }));
 }
-
 /* -------------------------------------------------------------------------- */
 /* Central company membership archive records                                 */
 /* -------------------------------------------------------------------------- */
@@ -283,18 +321,21 @@ async function getCentralMembershipRecords(
     const result = await pool.query(
         `
         SELECT
-            recycle_bin_id,
-            company_id,
-            user_id,
-            module_key,
-            source_table,
-            record_label,
-            deleted_by,
-            deleted_at,
-            deletion_reason
-        FROM public.user_company_recycle_bin_items
-        WHERE company_id = $1
-        ORDER BY deleted_at DESC, recycle_bin_id DESC
+            r.recycle_bin_id,
+            r.company_id,
+            r.user_id,
+            r.module_key,
+            r.source_table,
+            r.record_label,
+            r.deleted_by,
+            u.full_name AS deleted_by_name,
+            r.deleted_at,
+            r.deletion_reason
+        FROM public.user_company_recycle_bin_items r
+        LEFT JOIN public.users u
+            ON u.user_id = r.deleted_by
+        WHERE r.company_id = $1
+        ORDER BY r.deleted_at DESC, r.recycle_bin_id DESC
         `,
         [companyId]
     );
@@ -319,16 +360,17 @@ async function getCentralMembershipRecords(
             source_record_id: `${record.user_id}:${record.company_id}`,
             record_label: record.record_label,
             deleted_by: record.deleted_by,
+            deleted_by_name: record.deleted_by_name || null,
             deleted_at: record.deleted_at,
             deletion_reason: record.deletion_reason,
             archive_source: "central",
         };
     });
 }
-
 /* -------------------------------------------------------------------------- */
 /* Central role archive records                                               */
 /* -------------------------------------------------------------------------- */
+
 
 async function getCentralRoleRecords(companyId, moduleKey) {
     if (moduleKey && moduleKey !== "roles") {
@@ -338,18 +380,19 @@ async function getCentralRoleRecords(companyId, moduleKey) {
     const result = await pool.query(
         `
         SELECT
-            recycle_bin_id,
-            company_id,
-            role_id,
-            record_label,
-            deleted_by,
-            deleted_at,
-            deletion_reason
-        FROM public.role_recycle_bin_items
-        WHERE company_id = $1
-          AND module_key = 'roles'
-          AND source_table = 'roles'
-        ORDER BY deleted_at DESC, recycle_bin_id DESC
+            r.recycle_bin_id,
+            r.company_id,
+            r.role_id,
+            r.record_label,
+            r.deleted_by,
+            u.full_name AS deleted_by_name,
+            r.deleted_at,
+            r.deletion_reason
+        FROM public.role_recycle_bin_items r
+        LEFT JOIN public.users u
+            ON u.user_id = r.deleted_by
+        WHERE r.company_id = $1
+        ORDER BY r.deleted_at DESC, r.recycle_bin_id DESC
         `,
         [companyId]
     );
@@ -373,13 +416,13 @@ async function getCentralRoleRecords(companyId, moduleKey) {
             source_record_id: String(record.role_id),
             record_label: record.record_label,
             deleted_by: record.deleted_by,
+            deleted_by_name: record.deleted_by_name || null,
             deleted_at: record.deleted_at,
             deletion_reason: record.deletion_reason,
             archive_source: "central",
         };
     });
 }
-
 /* -------------------------------------------------------------------------- */
 /* GET /api/recycle-bin                                                       */
 /* -------------------------------------------------------------------------- */

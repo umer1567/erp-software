@@ -556,17 +556,18 @@ async function restoreCentralRole(archiveId, companyId) {
 /* -------------------------------------------------------------------------- */
 
 
+
 async function restoreTenantRecord(tenant, recycleBinId, companyId) {
     let client;
     let transactionStarted = false;
 
     try {
+        // All operational records and Recycle Bin archives use central erp_system.
         client = await tenant.db.connect();
 
         await client.query("BEGIN");
         transactionStarted = true;
 
-        // Archive ownership is verified using company_id.
         const archiveResult = await client.query(
             `
             SELECT
@@ -587,7 +588,6 @@ async function restoreTenantRecord(tenant, recycleBinId, companyId) {
         if (archiveResult.rowCount !== 1) {
             await client.query("ROLLBACK");
             transactionStarted = false;
-
             return errorResponse("Archived record not found.", 404);
         }
 
@@ -616,8 +616,6 @@ async function restoreTenantRecord(tenant, recycleBinId, companyId) {
             );
         }
 
-        // The tenant database already belongs to this company.
-        // Do not filter operational records by company_id.
         const originalResult = await client.query(
             `
             SELECT *
@@ -633,37 +631,58 @@ async function restoreTenantRecord(tenant, recycleBinId, companyId) {
             transactionStarted = false;
 
             return errorResponse(
-                "The original record no longer exists in this company. The archive entry has been preserved.",
+                "The original record no longer exists. The archive entry has been preserved.",
                 409
             );
         }
 
-        if (originalResult.rows[0].deleted_at == null) {
-            await client.query("ROLLBACK");
-            transactionStarted = false;
+        let restoreResult;
 
-            return errorResponse("This record is already active.", 409);
+        // Products use is_active, not deleted_at/deleted_by.
+        if (archived.module_key === "products") {
+            if (originalResult.rows[0].is_active === true) {
+                await client.query("ROLLBACK");
+                transactionStarted = false;
+
+                return errorResponse("This product is already active.", 409);
+            }
+
+            restoreResult = await client.query(
+                `
+                UPDATE public.products
+                SET is_active = TRUE
+                WHERE product_id = $1
+                  AND is_active = FALSE
+                RETURNING product_id
+                `,
+                [recordId]
+            );
+        } else {
+            if (originalResult.rows[0].deleted_at == null) {
+                await client.query("ROLLBACK");
+                transactionStarted = false;
+
+                return errorResponse("This record is already active.", 409);
+            }
+
+            restoreResult = await client.query(
+                `
+                UPDATE public.${config.table}
+                SET
+                    deleted_at = NULL,
+                    deleted_by = NULL
+                WHERE ${config.idColumn} = $1
+                  AND deleted_at IS NOT NULL
+                RETURNING ${config.idColumn}
+                `,
+                [recordId]
+            );
         }
-
-        // Restore the original tenant record.
-        const restoreResult = await client.query(
-            `
-            UPDATE public.${config.table}
-            SET
-                deleted_at = NULL,
-                deleted_by = NULL
-            WHERE ${config.idColumn} = $1
-              AND deleted_at IS NOT NULL
-            RETURNING ${config.idColumn}
-            `,
-            [recordId]
-        );
 
         if (restoreResult.rowCount !== 1) {
             throw new Error("The original record could not be restored.");
         }
 
-        // Keep company_id filtering on the archive table.
         const archiveDelete = await client.query(
             `
             DELETE FROM public.recycle_bin_items
@@ -695,7 +714,7 @@ async function restoreTenantRecord(tenant, recycleBinId, companyId) {
         if (client && transactionStarted) {
             await client.query("ROLLBACK").catch((rollbackError) => {
                 console.error(
-                    "TENANT RESTORE ROLLBACK ERROR:",
+                    "CENTRAL RESTORE ROLLBACK ERROR:",
                     rollbackError
                 );
             });
@@ -719,7 +738,7 @@ async function restoreTenantRecord(tenant, recycleBinId, companyId) {
 
         if (error.code === "42P01") {
             return errorResponse(
-                "The tenant Recycle Bin table is missing. Apply the required tenant migrations first.",
+                "A required central database table is missing.",
                 503
             );
         }

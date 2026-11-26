@@ -925,7 +925,7 @@ export default function RecycleBinPage() {
                               size={14}
                               className="text-slate-400"
                             />
-                            {record.deleted_by ?? "Unknown"}
+                            {record.deleted_by_name || "Unknown"}
                           </div>
                         </td>
 

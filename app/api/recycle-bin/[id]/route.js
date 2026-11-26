@@ -295,7 +295,7 @@ async function permanentlyDeleteCentralMembership(
     let transactionStarted = false;
 
     try {
-        client = await pool.connect();
+        client = await tenant.db.connect();
 
         await client.query("BEGIN");
         transactionStarted = true;
@@ -638,6 +638,7 @@ async function permanentlyDeleteCentralRole(archiveId, companyId) {
 /* -------------------------------------------------------------------------- */
 
 
+
 async function permanentlyDeleteTenantRecord(
     tenant,
     recycleBinId,
@@ -647,12 +648,12 @@ async function permanentlyDeleteTenantRecord(
     let transactionStarted = false;
 
     try {
-        client = await tenant.db.connect();
+        // Use central erp_system for both archive and operational records.
+        const client = await tenant.db.connect();
 
         await client.query("BEGIN");
         transactionStarted = true;
 
-        // company_id belongs to the archive table, so KEEP this filter.
         const archiveResult = await client.query(
             `
             SELECT
@@ -702,8 +703,6 @@ async function permanentlyDeleteTenantRecord(
             );
         }
 
-        // Tenant database is already company-specific.
-        // Operational tables do NOT require company_id.
         const originalResult = await client.query(
             `
             SELECT *
@@ -724,37 +723,69 @@ async function permanentlyDeleteTenantRecord(
             );
         }
 
-        if (originalResult.rows[0].deleted_at == null) {
-            await client.query("ROLLBACK");
-            transactionStarted = false;
+        let deleteResult;
+        
+        // Products: permanently remove related stock adjustment
+        // item history, then permanently delete the archived product.
+        if (archived.module_key === "products") {
+            if (originalResult.rows[0].is_active === true) {
+                await client.query("ROLLBACK");
+                transactionStarted = false;
 
-            return errorResponse(
-                "This record is active. Archive it correctly before permanent deletion.",
-                409
+                return errorResponse(
+                    "This product is active. Archive it before permanent deletion.",
+                    409
+                );
+            }
+
+            // Delete stock adjustment history referencing this product.
+            await client.query(
+                `
+                DELETE FROM public.stock_adjustment_items
+                WHERE product_id = $1
+                `,
+                [recordId]
+            );
+
+            // Permanently delete the product.
+            deleteResult = await client.query(
+                `
+                DELETE FROM public.products
+                WHERE product_id = $1
+                  AND is_active = FALSE
+                RETURNING product_id
+                `,
+                [recordId]
+            );
+        } else {
+            if (originalResult.rows[0].deleted_at == null) {
+                await client.query("ROLLBACK");
+                transactionStarted = false;
+
+                return errorResponse(
+                    "This record is active. Archive it before permanent deletion.",
+                    409
+                );
+            }
+
+            deleteResult = await client.query(
+                `
+                DELETE FROM public.${config.table}
+                WHERE ${config.idColumn} = $1
+                  AND deleted_at IS NOT NULL
+                RETURNING ${config.idColumn}
+                `,
+                [recordId]
             );
         }
 
-        const deleteResult = await client.query(
-            `
-            DELETE FROM public.${config.table}
-            WHERE ${config.idColumn} = $1
-              AND deleted_at IS NOT NULL
-            RETURNING ${config.idColumn}
-            `,
-            [recordId]
-        );
 
         if (deleteResult.rowCount !== 1) {
-            await client.query("ROLLBACK");
-            transactionStarted = false;
-
-            return errorResponse(
-                "The original record could not be permanently deleted.",
-                409
+            throw new Error(
+                "The original record could not be permanently deleted."
             );
         }
 
-        // Keep company_id here: this is the archive table.
         const archiveDelete = await client.query(
             `
             DELETE FROM public.recycle_bin_items
@@ -786,7 +817,7 @@ async function permanentlyDeleteTenantRecord(
         if (client && transactionStarted) {
             await client.query("ROLLBACK").catch((rollbackError) => {
                 console.error(
-                    "PERMANENT DELETE ROLLBACK ERROR:",
+                    "CENTRAL PERMANENT DELETE ROLLBACK ERROR:",
                     rollbackError
                 );
             });
@@ -796,6 +827,15 @@ async function permanentlyDeleteTenantRecord(
             "RECYCLE BIN PERMANENT DELETE ERROR:",
             error
         );
+
+
+if (error.code === "23001") {
+    return errorResponse(
+        "This record is referenced by existing business records, such as stock adjustment history. It cannot be permanently deleted while those references exist. The Recycle Bin entry has been preserved.",
+        409
+    );
+}
+
 
         if (error.code === "23503") {
             return errorResponse(
@@ -813,7 +853,7 @@ async function permanentlyDeleteTenantRecord(
 
         if (error.code === "42P01") {
             return errorResponse(
-                "The tenant Recycle Bin table is missing. Apply the required tenant migrations first.",
+                "A required central database table is missing.",
                 503
             );
         }
