@@ -369,62 +369,93 @@ export default function NewAssemblyBuildPage() {
     // ---------------------------------------------------------
 
     useEffect(() => {
-        let active = true;
+    let active = true;
 
-        async function checkPermission() {
-            try {
-                const response = await fetch(
-                    `/api/permissions/current?permissionKey=${PERMISSION_KEY}`,
-                    {
-                        method: "GET",
-                        cache: "no-store",
-                    }
-                );
-
-                const data = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(
-                        getErrorMessage(
-                            data,
-                            "Unable to verify Assembly Build permissions."
-                        )
-                    );
+    async function checkPermission() {
+        try {
+            const response = await fetch(
+                `/api/permissions/current?permissionKey=${encodeURIComponent(PERMISSION_KEY)}`,
+                {
+                    method: "GET",
+                    cache: "no-store",
                 }
+            );
 
-                const source =
-                    data?.permissions?.[PERMISSION_KEY] ||
-                    data?.permission ||
-                    data?.permissions ||
-                    data ||
-                    {};
+            const data = await response.json();
 
-                const permission = Boolean(
-                    source.canCreate ?? source.can_create
+            if (!response.ok) {
+                throw new Error(
+                    getErrorMessage(
+                        data,
+                        "Unable to verify Assembly Build permissions."
+                    )
                 );
+            }
 
-                if (!active) return;
+            // Support both array and object API responses.
+            const permissionList = Array.isArray(data?.permissions)
+                ? data.permissions
+                : Array.isArray(data)
+                    ? data
+                    : [];
 
-                setCanCreate(permission);
-                setPermissionChecked(true);
-            } catch (err) {
-                if (!active) return;
+            const source =
+                data?.permission ||
+                permissionList.find(
+                    (item) =>
+                        item?.permission_key === PERMISSION_KEY ||
+                        item?.key === PERMISSION_KEY
+                ) ||
+                (
+                    data?.permissions &&
+                    !Array.isArray(data.permissions)
+                        ? data.permissions[PERMISSION_KEY] ||
+                          data.permissions
+                        : null
+                ) ||
+                (
+                    data?.permission_key === PERMISSION_KEY
+                        ? data
+                        : null
+                ) ||
+                {};
 
-                setError(err.message);
-                setPermissionChecked(true);
-            } finally {
-                if (active) {
-                    setInitializing(false);
-                }
+            const permission = Boolean(
+                source.canCreate ??
+                source.can_create ??
+                false
+            );
+
+            if (!active) return;
+
+            setCanCreate(permission);
+            setPermissionChecked(true);
+
+        } catch (err) {
+            if (!active) return;
+
+            console.error(
+                "Assembly Build permission error:",
+                err
+            );
+
+            setCanCreate(false);
+            setError(err.message);
+            setPermissionChecked(true);
+
+        } finally {
+            if (active) {
+                setInitializing(false);
             }
         }
+    }
 
-        checkPermission();
+    checkPermission();
 
-        return () => {
-            active = false;
-        };
-    }, []);
+    return () => {
+        active = false;
+    };
+}, []);
 
     // ---------------------------------------------------------
     // LOAD SUPPORTING DROPDOWNS

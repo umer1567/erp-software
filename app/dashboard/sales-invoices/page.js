@@ -398,68 +398,82 @@ export default function SalesInvoicesPage() {
     ITEM_COLUMNS
   );
 
-  useEffect(() => {
-    let cancelled = false;
+  
+useEffect(() => {
+  let cancelled = false;
 
-    async function loadPermissions() {
-      try {
-        setPermissionLoading(true);
+  async function loadPermissions() {
+    try {
+      setPermissionLoading(true);
 
-        const response = await fetch(
-          "/api/permissions/current?permissionKey=sales_invoices",
-          { cache: "no-store" }
+      // Use the same permission response structure as the Sidebar.
+      const response = await fetch("/api/permissions/current", {
+        cache: "no-store",
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || data.success === false) {
+        throw new Error(data.message || "Failed to load permissions.");
+      }
+
+      const permissionList = Array.isArray(data.permissions)
+        ? data.permissions
+        : Array.isArray(data)
+          ? data
+          : [];
+
+      const permission =
+        permissionList.find(
+          (item) => item.permission_key === "sales_invoices"
+        ) ||
+        data.permission ||
+        (data.permissions && !Array.isArray(data.permissions)
+          ? data.permissions
+          : null);
+
+      const toBoolean = (value) =>
+        value === true || value === "true" || value === 1 || value === "1";
+
+      if (!permission) {
+        throw new Error(
+          'The "sales_invoices" permission was not returned by the API.'
         );
+      }
 
-        const data = await response.json();
+      if (!cancelled) {
+        setPermissions({
+          can_view: toBoolean(permission.can_view),
+          can_create: toBoolean(permission.can_create),
+          can_update: toBoolean(permission.can_update),
+          can_delete: toBoolean(permission.can_delete),
+        });
+      }
+    } catch (error) {
+      console.error("Sales Invoices permissions:", error);
 
-        if (!response.ok || data.success === false) {
-          throw new Error(data.message || "Failed to load permissions.");
-        }
-
-        const permission = data.permission || data.permissions || data;
-
-        if (!cancelled) {
-          setPermissions({
-            can_view:
-              permission.can_view === true || permission.can_view === "true",
-
-            can_create:
-              permission.can_create === true ||
-              permission.can_create === "true",
-
-            can_update:
-              permission.can_update === true ||
-              permission.can_update === "true",
-
-            can_delete:
-              permission.can_delete === true ||
-              permission.can_delete === "true",
-          });
-        }
-      } catch (error) {
-        console.error("Sales Invoices permissions:", error);
-
-        if (!cancelled) {
-          setPermissions({
-            can_view: false,
-            can_create: false,
-            can_update: false,
-            can_delete: false,
-          });
-        }
-      } finally {
-        if (!cancelled) {
-          setPermissionLoading(false);
-        }
+      if (!cancelled) {
+        setPermissions({
+          can_view: false,
+          can_create: false,
+          can_update: false,
+          can_delete: false,
+        });
+      }
+    } finally {
+      if (!cancelled) {
+        setPermissionLoading(false);
       }
     }
+  }
 
-    loadPermissions();
+  loadPermissions();
 
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  return () => {
+    cancelled = true;
+  };
+}, []);
+
 
   useEffect(() => {
     let cancelled = false;

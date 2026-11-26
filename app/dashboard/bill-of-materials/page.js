@@ -39,18 +39,69 @@ const DEFAULT_COLUMNS = {
 // ---------------------------------------------------------
 
 function normalizePermissions(data) {
-    const source =
-        data?.permissions?.[PERMISSION_KEY] ||
-        data?.permission ||
-        data?.permissions ||
-        data ||
-        {};
+    const permissionList = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.permissions)
+            ? data.permissions
+            : Array.isArray(data?.data)
+                ? data.data
+                : [];
+
+    let source = null;
+
+    // API returns an array of permissions.
+    if (permissionList.length > 0) {
+        source = permissionList.find(
+            (item) =>
+                item?.permission_key === PERMISSION_KEY ||
+                item?.permissionKey === PERMISSION_KEY
+        );
+    }
+
+    // API returns a permission object.
+    if (!source && data?.permission && !Array.isArray(data.permission)) {
+        source = data.permission;
+    }
+
+    // API returns permissions as an object keyed by permission name.
+    if (!source && data?.permissions && !Array.isArray(data.permissions)) {
+        source =
+            data.permissions[PERMISSION_KEY] ||
+            (
+                data.permissions.permission_key === PERMISSION_KEY
+                    ? data.permissions
+                    : null
+            );
+    }
+
+    // API returns the permission directly.
+    if (!source && (
+        data?.permission_key === PERMISSION_KEY ||
+        data?.permissionKey === PERMISSION_KEY
+    )) {
+        source = data;
+    }
+
+    // Support a nested data object.
+    if (!source && data?.data && !Array.isArray(data.data)) {
+        source = normalizePermissions(data.data);
+        return source;
+    }
+
+    if (!source) {
+        return {
+            canView: false,
+            canCreate: false,
+            canUpdate: false,
+            canDelete: false,
+        };
+    }
 
     return {
-        canView: Boolean(source.canView ?? source.can_view),
-        canCreate: Boolean(source.canCreate ?? source.can_create),
-        canUpdate: Boolean(source.canUpdate ?? source.can_update),
-        canDelete: Boolean(source.canDelete ?? source.can_delete),
+        canView: source.canView === true || source.can_view === true,
+        canCreate: source.canCreate === true || source.can_create === true,
+        canUpdate: source.canUpdate === true || source.can_update === true,
+        canDelete: source.canDelete === true || source.can_delete === true,
     };
 }
 
@@ -228,96 +279,96 @@ export default function BillOfMaterialsHistoryPage() {
     // ---------------------------------------------------------
 
     useEffect(() => {
-        let active = true;
+    let active = true;
 
-        async function initializePage() {
-            try {
-                const permissionResponse = await fetch(
-                    `/api/permissions/current?permissionKey=${PERMISSION_KEY}`,
-                    {
-                        method: "GET",
-                        cache: "no-store",
-                    }
+    async function initializePage() {
+        try {
+            const permissionResponse = await fetch(
+                `/api/permissions/current?permissionKey=${encodeURIComponent(PERMISSION_KEY)}`,
+                {
+                    method: "GET",
+                    cache: "no-store",
+                }
+            );
+
+            const permissionData = await permissionResponse.json();
+
+            if (!permissionResponse.ok) {
+                throw new Error(
+                    permissionData.message ||
+                    permissionData.error ||
+                    "Unable to verify BOM permissions."
                 );
+            }
 
-                const permissionData = await permissionResponse.json();
+            const result = normalizePermissions(permissionData);
 
-                if (!permissionResponse.ok) {
-                    throw new Error(
-                        permissionData.message ||
-                        "Unable to verify BOM permissions."
-                    );
+            if (!active) return;
+
+            setPermissions(result);
+            setPermissionChecked(true);
+
+            if (!result.canView) {
+                setLoading(false);
+                return;
+            }
+
+            const historyResponse = await fetch(
+                "/api/bill-of-materials",
+                {
+                    method: "GET",
+                    cache: "no-store",
                 }
+            );
 
-                const result = normalizePermissions(permissionData);
+            const historyData = await historyResponse.json();
 
-                if (!active) return;
-
-                setPermissions(result);
-                setPermissionChecked(true);
-
-                // Do not request BOM history without view permission.
-                if (!result.canView) {
-                    setLoading(false);
-                    return;
-                }
-
-                const historyResponse = await fetch(
-                    "/api/bill-of-materials",
-                    {
-                        method: "GET",
-                        cache: "no-store",
-                    }
+            if (!historyResponse.ok || historyData.success === false) {
+                throw new Error(
+                    historyData.message ||
+                    historyData.error ||
+                    "Unable to load BOM history."
                 );
+            }
 
-                const historyData = await historyResponse.json();
+            const rows = Array.isArray(historyData.billOfMaterials)
+                ? historyData.billOfMaterials
+                : Array.isArray(historyData.records)
+                    ? historyData.records
+                    : Array.isArray(historyData.data)
+                        ? historyData.data
+                        : Array.isArray(historyData)
+                            ? historyData
+                            : [];
 
-                if (
-                    !historyResponse.ok ||
-                    historyData.success === false
-                ) {
-                    throw new Error(
-                        historyData.message ||
-                        historyData.error ||
-                        "Unable to load BOM history."
-                    );
-                }
+            if (!active) return;
 
-                const rows = Array.isArray(historyData.billOfMaterials)
-                    ? historyData.billOfMaterials
-                    : Array.isArray(historyData.records)
-                        ? historyData.records
-                        : Array.isArray(historyData.data)
-                            ? historyData.data
-                            : Array.isArray(historyData)
-                                ? historyData
-                                : [];
+            setRecords(rows);
 
-                if (!active) return;
+        } catch (err) {
+            if (!active) return;
 
-                setRecords(rows);
-            } catch (err) {
-                if (!active) return;
+            console.error("BOM initialization error:", err);
 
-                setError(
-                    err.message ||
-                    "Unable to initialize BOM history."
-                );
+            setError(
+                err.message ||
+                "Unable to initialize BOM history."
+            );
 
-                setPermissionChecked(true);
-            } finally {
-                if (active) {
-                    setLoading(false);
-                }
+            setPermissionChecked(true);
+        } finally {
+            if (active) {
+                setLoading(false);
             }
         }
+    }
 
-        initializePage();
+    initializePage();
 
-        return () => {
-            active = false;
-        };
-    }, []);
+    return () => {
+        active = false;
+    };
+}, []);
 
     // ---------------------------------------------------------
     // FILTERED RECORDS

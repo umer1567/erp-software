@@ -449,6 +449,7 @@ export async function GET() {
       LEFT JOIN chart_of_accounts ca
         ON ca.account_id = p.cogs_account_id
         WHERE p.deleted_at IS NULL
+  AND COALESCE(p.is_active, FALSE) = TRUE
       ORDER BY p.product_id DESC
     `;
 

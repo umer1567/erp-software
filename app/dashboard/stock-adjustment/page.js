@@ -231,54 +231,78 @@ export default function StockAdjustmentPage() {
   }, []);
 
   // Load the signed-in user's permissions.
-  useEffect(() => {
-    let cancelled = false;
+  
+// Load the signed-in user's permissions.
+useEffect(() => {
+  let cancelled = false;
 
-    async function loadPermission() {
-      setPermissionLoading(true);
-      setPermissionError("");
-      setPermission(deniedPermission);
+  async function loadPermission() {
+    setPermissionLoading(true);
+    setPermissionError("");
+    setPermission(deniedPermission);
 
-      try {
-        const response = await fetch(
-          `/api/permissions/current?permissionKey=${encodeURIComponent(
-            PERMISSION_KEY
-          )}`,
-          { cache: "no-store" }
+    try {
+      const response = await fetch(
+        `/api/permissions/current?permissionKey=${encodeURIComponent(
+          PERMISSION_KEY
+        )}`,
+        { cache: "no-store" }
+      );
+
+      const data = await readResponse(
+        response,
+        "Unable to verify your Stock Adjustment permissions."
+      );
+
+      if (cancelled) return;
+
+      // Support both array and object API response formats.
+      const permissionList = Array.isArray(data.permissions)
+        ? data.permissions
+        : Array.isArray(data)
+          ? data
+          : [];
+
+      const receivedPermission =
+        data.permission ||
+        permissionList.find(
+          (item) => item.permission_key === PERMISSION_KEY
+        ) ||
+        (data.permissions && !Array.isArray(data.permissions)
+          ? data.permissions
+          : null) ||
+        (data.permission_key === PERMISSION_KEY ? data : null);
+
+      if (!receivedPermission) {
+        throw new Error(
+          `The "${PERMISSION_KEY}" permission was not returned by the API.`
         );
+      }
 
-        const data = await readResponse(
-          response,
-          "Unable to verify your Stock Adjustment permissions."
+      setPermission(normalizePermissions(receivedPermission));
+    } catch (error) {
+      console.error("Stock Adjustment permission error:", error);
+
+      if (!cancelled) {
+        setPermission(deniedPermission);
+        setPermissionError(
+          error.message || "Unable to verify your permissions."
         );
-
-        if (cancelled) return;
-
-        // Accept common API response shapes.
-        const receivedPermission =
-          data.permission ?? data.permissions ?? data;
-
-        setPermission(normalizePermissions(receivedPermission));
-      } catch (error) {
-        if (!cancelled) {
-          setPermission(deniedPermission);
-          setPermissionError(
-            error.message || "Unable to verify your permissions."
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setPermissionLoading(false);
-        }
+      }
+    } finally {
+      if (!cancelled) {
+        setPermissionLoading(false);
       }
     }
+  }
 
-    loadPermission();
+  loadPermission();
 
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  return () => {
+    cancelled = true;
+  };
+}, []);
+
 
   // Load product and warehouse data only when View is allowed.
   const fetchData = useCallback(

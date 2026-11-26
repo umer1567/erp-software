@@ -43,21 +43,36 @@ const DEFAULT_COLUMNS = {
 // ---------------------------------------------------------
 
 function normalizePermissions(data) {
+    const permissionList = Array.isArray(data?.permissions)
+        ? data.permissions
+        : Array.isArray(data)
+            ? data
+            : [];
+
     const source =
-        data?.permissions?.[PERMISSION_KEY] ||
         data?.permission ||
-        data?.permissions ||
-        data ||
-        {};
+        permissionList.find(
+            (item) => item?.permission_key === PERMISSION_KEY
+        ) ||
+        (
+            data?.permissions &&
+            !Array.isArray(data.permissions)
+                ? data.permissions
+                : null
+        ) ||
+        (
+            data?.permission_key === PERMISSION_KEY
+                ? data
+                : null
+        );
 
     return {
-        canView: Boolean(source.canView ?? source.can_view),
-        canCreate: Boolean(source.canCreate ?? source.can_create),
-        canUpdate: Boolean(source.canUpdate ?? source.can_update),
-        canDelete: Boolean(source.canDelete ?? source.can_delete),
+        canView: Boolean(source?.canView ?? source?.can_view),
+        canCreate: Boolean(source?.canCreate ?? source?.can_create),
+        canUpdate: Boolean(source?.canUpdate ?? source?.can_update),
+        canDelete: Boolean(source?.canDelete ?? source?.can_delete),
     };
 }
-
 function formatDate(value) {
     if (!value) return "-";
 
@@ -290,93 +305,94 @@ export default function AssemblyBuildHistoryPage() {
     // ---------------------------------------------------------
 
     useEffect(() => {
-        let active = true;
+    let active = true;
 
-        async function initializePage() {
-            try {
-                const permissionResponse = await fetch(
-                    `/api/permissions/current?permissionKey=${PERMISSION_KEY}`,
-                    {
-                        method: "GET",
-                        cache: "no-store",
-                    }
-                );
-
-                const permissionData = await permissionResponse.json();
-
-                if (!permissionResponse.ok) {
-                    throw new Error(
-                        permissionData.message ||
-                        "Unable to verify Assembly Build permissions."
-                    );
-                }
-
-                const result = normalizePermissions(permissionData);
-
-                if (!active) return;
-
-                setPermissions(result);
-                setPermissionChecked(true);
-
-                // Do not load history without view permission.
-                if (!result.canView) {
-                    setLoading(false);
-                    return;
-                }
-
-                const historyResponse = await fetch(API_URL, {
+    async function initializePage() {
+        try {
+            const permissionResponse = await fetch(
+                `/api/permissions/current?permissionKey=${encodeURIComponent(PERMISSION_KEY)}`,
+                {
                     method: "GET",
                     cache: "no-store",
-                });
-
-                const historyData = await historyResponse.json();
-
-                if (
-                    !historyResponse.ok ||
-                    historyData.success === false
-                ) {
-                    throw new Error(
-                        historyData.message ||
-                        historyData.error ||
-                        "Unable to load Assembly Build history."
-                    );
                 }
+            );
 
-                const rows = Array.isArray(historyData.assemblyBuilds)
-                    ? historyData.assemblyBuilds
-                    : Array.isArray(historyData.records)
-                        ? historyData.records
-                        : Array.isArray(historyData.data)
-                            ? historyData.data
-                            : Array.isArray(historyData)
-                                ? historyData
-                                : [];
+            const permissionData = await permissionResponse.json();
 
-                if (!active) return;
-
-                setRecords(rows);
-            } catch (err) {
-                if (!active) return;
-
-                setError(
-                    err.message ||
-                    "Unable to initialize Assembly Build history."
+            if (!permissionResponse.ok) {
+                throw new Error(
+                    permissionData.message ||
+                    permissionData.error ||
+                    "Unable to verify Assembly Build permissions."
                 );
+            }
 
-                setPermissionChecked(true);
-            } finally {
-                if (active) {
-                    setLoading(false);
-                }
+            const result = normalizePermissions(permissionData);
+
+            if (!active) return;
+
+            setPermissions(result);
+            setPermissionChecked(true);
+
+            if (!result.canView) {
+                setLoading(false);
+                return;
+            }
+
+            const historyResponse = await fetch(API_URL, {
+                method: "GET",
+                cache: "no-store",
+            });
+
+            const historyData = await historyResponse.json();
+
+            if (!historyResponse.ok || historyData.success === false) {
+                throw new Error(
+                    historyData.message ||
+                    historyData.error ||
+                    "Unable to load Assembly Build history."
+                );
+            }
+
+            const rows = Array.isArray(historyData.assemblyBuilds)
+                ? historyData.assemblyBuilds
+                : Array.isArray(historyData.records)
+                    ? historyData.records
+                    : Array.isArray(historyData.data)
+                        ? historyData.data
+                        : Array.isArray(historyData)
+                            ? historyData
+                            : [];
+
+            if (!active) return;
+
+            setRecords(rows);
+
+        } catch (err) {
+            if (!active) return;
+
+            console.error("Assembly Build initialization error:", err);
+
+            setError(
+                err.message ||
+                "Unable to initialize Assembly Build history."
+            );
+
+            setPermissionChecked(true);
+
+        } finally {
+            if (active) {
+                setLoading(false);
             }
         }
+    }
 
-        initializePage();
+    initializePage();
 
-        return () => {
-            active = false;
-        };
-    }, []);
+    return () => {
+        active = false;
+    };
+}, []);
 
     // ---------------------------------------------------------
     // FILTERED RECORDS
