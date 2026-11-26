@@ -650,10 +650,12 @@ async function restoreTenantRecord(tenant, recycleBinId, companyId) {
             restoreResult = await client.query(
                 `
                 UPDATE public.products
-                SET is_active = TRUE
-                WHERE product_id = $1
-                  AND is_active = FALSE
-                RETURNING product_id
+SET
+    is_active = TRUE,
+    deleted_at = NULL,
+    deleted_by = NULL
+WHERE product_id = $1
+  AND deleted_at IS NOT NULL;
                 `,
                 [recordId]
             );
