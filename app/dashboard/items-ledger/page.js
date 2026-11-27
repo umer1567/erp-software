@@ -1,3 +1,4 @@
+
 "use client";
 
 import {
@@ -41,11 +42,15 @@ const LABEL_CLASS =
 
 const EMPTY_TOTALS = {
   opening_quantity: 0,
+  opening_inventory_value: 0,
   received_quantity: 0,
   issued_quantity: 0,
   receive_amount: 0,
   issue_amount: 0,
   current_stock: 0,
+  closing_inventory_value: 0,
+  closing_average_cost: 0,
+  valuation_warnings: 0,
 };
 
 const DENIED_PERMISSION = {
@@ -55,24 +60,27 @@ const DENIED_PERMISSION = {
   can_delete: false,
 };
 
-// Keys must match the `key` values in transactionColumns below.
+// Keys must match transactionColumns below.
 const LEDGER_COLUMNS = [
   { key: "date", label: "Transaction date" },
   { key: "type", label: "Transaction type" },
   { key: "number", label: "Transaction no." },
+  { key: "warehouse", label: "Warehouse" },
   { key: "uom", label: "UOM" },
   { key: "memo", label: "Memo" },
   { key: "transaction_rate", label: "Transaction rate" },
-  { key: "old_rate", label: "Old rate" },
+  { key: "old_rate", label: "Old AVCO" },
   { key: "actual_rate", label: "Actual rate" },
-  { key: "new_rate", label: "New rate" },
+  { key: "new_rate", label: "New AVCO" },
   { key: "receive_quantity", label: "Receive quantity" },
   { key: "receive_rate", label: "Receive rate" },
   { key: "receive_amount", label: "Receive amount" },
   { key: "issue_quantity", label: "Issue quantity" },
   { key: "issue_rate", label: "Issue rate" },
   { key: "issue_amount", label: "Issue amount" },
-  { key: "running_total", label: "Running total" },
+  { key: "running_total", label: "Running quantity" },
+  { key: "average_cost", label: "Running AVCO" },
+  { key: "running_inventory_value", label: "Inventory value" },
 ];
 
 /* =========================================================
@@ -89,6 +97,14 @@ function formatAmount(value) {
   return Number(value || 0).toLocaleString("en-PK", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
+  });
+}
+
+// AVCO rates need more precision than normal currency amounts.
+function formatRate(value) {
+  return Number(value || 0).toLocaleString("en-PK", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 8,
   });
 }
 
@@ -131,29 +147,19 @@ function normalizePermission(data) {
     data;
 
   return {
-    can_view:
-      permission?.can_view ??
-      permission?.canView ??
-      false,
-    can_create:
-      permission?.can_create ??
-      permission?.canCreate ??
-      false,
-    can_update:
-      permission?.can_update ??
-      permission?.canUpdate ??
-      false,
-    can_delete:
-      permission?.can_delete ??
-      permission?.canDelete ??
-      false,
+    can_view: permission?.can_view ?? permission?.canView ?? false,
+    can_create: permission?.can_create ?? permission?.canCreate ?? false,
+    can_update: permission?.can_update ?? permission?.canUpdate ?? false,
+    can_delete: permission?.can_delete ?? permission?.canDelete ?? false,
   };
 }
 
+function formatCSVValue(value) {
+  return `"${String(value ?? "").replace(/"/g, '""')}"`;
+}
+
 /* =========================================================
-   COLUMN VISIBILITY HOOK
-   (localStorage via useSyncExternalStore: no effects, no
-   setState-in-effect, no hydration mismatch)
+   COLUMN VISIBILITY
 ========================================================= */
 
 const columnListeners = new Set();
@@ -183,17 +189,15 @@ function writeColumnPrefs(storageKey, value) {
     console.error("Unable to save column preferences:", error);
   }
 
-  // Notify every hook instance in this tab
   columnListeners.forEach((listener) => listener());
 }
 
 function useColumnVisibility(storageKey, columns) {
   const defaults = useMemo(
-    () => Object.fromEntries(columns.map((c) => [c.key, true])),
+    () => Object.fromEntries(columns.map((column) => [column.key, true])),
     [columns]
   );
 
-  // Server snapshot is "" so the first render matches the server.
   const raw = useSyncExternalStore(
     subscribeColumnPrefs,
     () => readColumnPrefs(storageKey),
@@ -210,7 +214,7 @@ function useColumnVisibility(storageKey, columns) {
         return { ...defaults, ...parsed };
       }
     } catch {
-      // ignore corrupted data and fall back to defaults
+      // Use default visibility if saved preferences are invalid.
     }
 
     return defaults;
@@ -219,7 +223,6 @@ function useColumnVisibility(storageKey, columns) {
   const toggle = (key) => {
     const next = { ...visible, [key]: !visible[key] };
 
-    // Always keep at least one column visible
     if (!Object.values(next).some(Boolean)) return;
 
     writeColumnPrefs(storageKey, JSON.stringify(next));
@@ -229,7 +232,7 @@ function useColumnVisibility(storageKey, columns) {
     writeColumnPrefs(storageKey, JSON.stringify(defaults));
   };
 
-  const count = columns.filter((c) => visible[c.key]).length;
+  const count = columns.filter((column) => visible[column.key]).length;
 
   return { visible, toggle, showAll, count };
 }
@@ -245,10 +248,15 @@ function ColumnToggle({ columns, state }) {
   useEffect(() => {
     if (!open) return;
 
-    const onClick = (e) => {
-      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    const onClick = (event) => {
+      if (ref.current && !ref.current.contains(event.target)) {
+        setOpen(false);
+      }
     };
-    const onKey = (e) => e.key === "Escape" && setOpen(false);
+
+    const onKey = (event) => {
+      if (event.key === "Escape") setOpen(false);
+    };
 
     document.addEventListener("mousedown", onClick);
     document.addEventListener("keydown", onKey);
@@ -263,7 +271,7 @@ function ColumnToggle({ columns, state }) {
     <div ref={ref} className="relative">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpen((value) => !value)}
         className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
       >
         <Eye size={15} />
@@ -278,7 +286,7 @@ function ColumnToggle({ columns, state }) {
       </button>
 
       {open && (
-        <div className="absolute right-0 z-30 mt-2 w-60 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+        <div className="absolute right-0 z-30 mt-2 w-64 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl dark:border-slate-700 dark:bg-slate-900">
           <div className="flex items-center justify-between px-2 pb-2 pt-1">
             <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
               Show columns
@@ -287,25 +295,25 @@ function ColumnToggle({ columns, state }) {
             <button
               type="button"
               onClick={state.showAll}
-              className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 dark:text-indigo-300 dark:hover:text-indigo-200"
+              className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 dark:text-indigo-300"
             >
               Show all
             </button>
           </div>
 
           <div className="max-h-72 overflow-y-auto">
-            {columns.map((col) => (
+            {columns.map((column) => (
               <label
-                key={col.key}
+                key={column.key}
                 className="flex cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2 text-sm text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800"
               >
                 <input
                   type="checkbox"
-                  checked={state.visible[col.key]}
-                  onChange={() => state.toggle(col.key)}
+                  checked={Boolean(state.visible[column.key])}
+                  onChange={() => state.toggle(column.key)}
                   className="h-4 w-4 rounded border-slate-300 accent-indigo-600"
                 />
-                {col.label}
+                {column.label}
               </label>
             ))}
           </div>
@@ -348,10 +356,7 @@ function SummaryCard({
           </p>
         </div>
 
-        <div
-          className={`shrink-0 rounded-xl p-3 ${styles[color] || styles.indigo
-            }`}
-        >
+        <div className={`shrink-0 rounded-xl p-3 ${styles[color] || styles.indigo}`}>
           <Icon size={21} />
         </div>
       </div>
@@ -367,12 +372,14 @@ function TransactionBadge({ type }) {
     value.includes("purchase") ||
     value.includes("increase") ||
     value.includes("opening") ||
-    value.includes("item receipt");
+    value.includes("item receipt") ||
+    value.includes("sales return");
 
   const isIssue =
     value.includes("issue") ||
     value.includes("sale") ||
-    value.includes("decrease");
+    value.includes("decrease") ||
+    value.includes("unbuild");
 
   const styles = isReceive
     ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
@@ -447,6 +454,7 @@ export default function ItemsLedgerPage() {
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [ledger, setLedger] = useState([]);
   const [totals, setTotals] = useState(EMPTY_TOTALS);
+  const [warehouseBalances, setWarehouseBalances] = useState([]);
 
   const [loadingProducts, setLoadingProducts] = useState(true);
   const [loadingLedger, setLoadingLedger] = useState(false);
@@ -457,13 +465,15 @@ export default function ItemsLedgerPage() {
   const [transactionFilter, setTransactionFilter] = useState("ALL");
   const [tableSearch, setTableSearch] = useState("");
 
-  // Column visibility for the transaction history table
   const ledgerCols = useColumnVisibility(
     "items-ledger.columns",
     LEDGER_COLUMNS
   );
 
-  // Load the current user's Items Ledger permissions first.
+  /* ---------------------------------------------------------
+     PERMISSIONS
+  --------------------------------------------------------- */
+
   useEffect(() => {
     let cancelled = false;
 
@@ -511,12 +521,12 @@ export default function ItemsLedgerPage() {
     };
   }, []);
 
-  // Do not fetch products until permission verification succeeds.
-  // Users without View permission never load the protected page data.
+  /* ---------------------------------------------------------
+     LOAD PRODUCTS
+  --------------------------------------------------------- */
+
   useEffect(() => {
-    if (permissionLoading || !canView) {
-      return;
-    }
+    if (permissionLoading || !canView) return;
 
     let cancelled = false;
 
@@ -535,15 +545,11 @@ export default function ItemsLedgerPage() {
         const data = await response.json();
 
         if (!response.ok || data.success === false) {
-          throw new Error(
-            getErrorMessage(data, "Failed to load products.")
-          );
+          throw new Error(getErrorMessage(data, "Failed to load products."));
         }
 
         if (!cancelled) {
-          setProducts(
-            Array.isArray(data.products) ? data.products : []
-          );
+          setProducts(Array.isArray(data.products) ? data.products : []);
           setError("");
         }
       } catch (err) {
@@ -565,6 +571,10 @@ export default function ItemsLedgerPage() {
       cancelled = true;
     };
   }, [permissionLoading, canView]);
+
+  /* ---------------------------------------------------------
+     LOAD LEDGER
+  --------------------------------------------------------- */
 
   const loadLedger = useCallback(async () => {
     if (!canView) {
@@ -588,6 +598,7 @@ export default function ItemsLedgerPage() {
     setSelectedProduct(null);
     setLedger([]);
     setTotals(EMPTY_TOTALS);
+    setWarehouseBalances([]);
 
     try {
       const params = new URLSearchParams();
@@ -620,30 +631,48 @@ export default function ItemsLedgerPage() {
       }
 
       setSelectedProduct(data.product || null);
-      setLedger(
-        Array.isArray(data.transactions) ? data.transactions : []
-      );
+      setLedger(Array.isArray(data.transactions) ? data.transactions : []);
 
       setTotals({
         opening_quantity: Number(data.totals?.opening_quantity) || 0,
+        opening_inventory_value:
+          Number(data.totals?.opening_inventory_value) || 0,
         received_quantity: Number(data.totals?.received_quantity) || 0,
         issued_quantity: Number(data.totals?.issued_quantity) || 0,
         receive_amount: Number(data.totals?.receive_amount) || 0,
         issue_amount: Number(data.totals?.issue_amount) || 0,
         current_stock: Number(data.totals?.current_stock) || 0,
+        closing_inventory_value:
+          Number(data.totals?.closing_inventory_value) || 0,
+        closing_average_cost:
+          Number(data.totals?.closing_average_cost) || 0,
+        valuation_warnings:
+          Number(data.totals?.valuation_warnings) || 0,
       });
+
+      setWarehouseBalances(
+        Array.isArray(data.warehouse_balances)
+          ? data.warehouse_balances
+          : []
+      );
 
       setHasSearched(true);
     } catch (err) {
       console.error("LOAD ITEM LEDGER ERROR:", err);
+
       setError(err.message || "Failed to load item ledger.");
       setSelectedProduct(null);
       setLedger([]);
       setTotals(EMPTY_TOTALS);
+      setWarehouseBalances([]);
     } finally {
       setLoadingLedger(false);
     }
   }, [canView, selectedProductId, fromDate, toDate, location]);
+
+  /* ---------------------------------------------------------
+     FILTERED DATA
+  --------------------------------------------------------- */
 
   const filteredProducts = useMemo(() => {
     const search = productSearch.trim().toLowerCase();
@@ -670,29 +699,41 @@ export default function ItemsLedgerPage() {
       const type = String(row.transaction_type || "").toLowerCase();
       const number = String(row.transaction_number || "").toLowerCase();
       const memo = String(row.memo || "").toLowerCase();
+      const warehouse = String(row.location || "").toLowerCase();
 
       const matchesSearch =
         !search ||
         type.includes(search) ||
         number.includes(search) ||
-        memo.includes(search);
+        memo.includes(search) ||
+        warehouse.includes(search);
+
+      const isReceive =
+        type.includes("receive") ||
+        type.includes("purchase") ||
+        type.includes("increase") ||
+        type.includes("opening") ||
+        type.includes("item receipt") ||
+        type.includes("sales return");
+
+      const isIssue =
+        type.includes("issue") ||
+        type.includes("sale") ||
+        type.includes("decrease") ||
+        type.includes("unbuild");
 
       const matchesType =
         transactionFilter === "ALL" ||
-        (transactionFilter === "RECEIVE" &&
-          (type.includes("receive") ||
-            type.includes("purchase") ||
-            type.includes("increase") ||
-            type.includes("opening") ||
-            type.includes("item receipt"))) ||
-        (transactionFilter === "ISSUE" &&
-          (type.includes("issue") ||
-            type.includes("sale") ||
-            type.includes("decrease")));
+        (transactionFilter === "RECEIVE" && isReceive) ||
+        (transactionFilter === "ISSUE" && isIssue);
 
       return matchesSearch && matchesType;
     });
   }, [ledger, tableSearch, transactionFilter]);
+
+  /* ---------------------------------------------------------
+     REFRESH PRODUCTS
+  --------------------------------------------------------- */
 
   async function refreshProducts() {
     if (!canView) return;
@@ -732,6 +773,7 @@ export default function ItemsLedgerPage() {
     setSelectedProduct(null);
     setLedger([]);
     setTotals(EMPTY_TOTALS);
+    setWarehouseBalances([]);
     setHasSearched(false);
     setError("");
   }
@@ -748,8 +790,11 @@ export default function ItemsLedgerPage() {
     setError("");
   }
 
-  // CSV export always includes every column, regardless of what is
-  // hidden in the table view.
+  /* ---------------------------------------------------------
+     CSV EXPORT
+     Always exports all columns, including hidden columns.
+  --------------------------------------------------------- */
+
   function exportCSV() {
     if (!canView) {
       setError("You do not have permission to view Items Ledger.");
@@ -765,28 +810,34 @@ export default function ItemsLedgerPage() {
       ["Transaction Date", (row) => formatDate(row.transaction_date)],
       ["Transaction Type", (row) => row.transaction_type || ""],
       ["Transaction Number", (row) => row.transaction_number || ""],
+      ["Warehouse", (row) => row.location || ""],
+      ["Warehouse ID", (row) => row.warehouse_id ?? ""],
       ["UOM", (row) => row.uom || ""],
       ["Memo", (row) => row.memo || ""],
       ["Transaction Rate", (row) => row.transaction_rate ?? 0],
-      ["Old Rate", (row) => row.old_rate ?? 0],
+      ["Old AVCO", (row) => row.old_rate ?? 0],
       ["Actual Rate", (row) => row.actual_rate ?? 0],
-      ["New Rate", (row) => row.new_rate ?? 0],
+      ["New AVCO", (row) => row.new_rate ?? 0],
       ["Receive Quantity", (row) => row.receive_quantity ?? 0],
       ["Receive Rate", (row) => row.receive_rate ?? 0],
       ["Receive Amount", (row) => row.receive_amount ?? 0],
       ["Issue Quantity", (row) => row.issue_quantity ?? 0],
       ["Issue Rate", (row) => row.issue_rate ?? 0],
       ["Issue Amount", (row) => row.issue_amount ?? 0],
-      ["Running Total", (row) => row.running_total ?? 0],
+      ["Running Quantity", (row) => row.running_total ?? 0],
+      ["Running AVCO", (row) => row.average_cost ?? 0],
+      [
+        "Running Inventory Value",
+        (row) => row.running_inventory_value ?? 0,
+      ],
     ];
 
-    const escapeCSV = (value) =>
-      `"${String(value ?? "").replace(/"/g, '""')}"`;
-
     const lines = [
-      columns.map(([heading]) => escapeCSV(heading)).join(","),
+      columns.map(([heading]) => formatCSVValue(heading)).join(","),
       ...filteredLedger.map((row) =>
-        columns.map(([, getter]) => escapeCSV(getter(row))).join(",")
+        columns
+          .map(([, getter]) => formatCSVValue(getter(row)))
+          .join(",")
       ),
     ];
 
@@ -798,14 +849,18 @@ export default function ItemsLedgerPage() {
     const link = document.createElement("a");
 
     link.href = url;
-    link.download = `items-ledger-${selectedProduct?.sku || selectedProductId
-      }.csv`;
+    link.download = `items-ledger-${selectedProduct?.sku || selectedProductId}.csv`;
 
     document.body.appendChild(link);
     link.click();
     link.remove();
+
     URL.revokeObjectURL(url);
   }
+
+  /* ---------------------------------------------------------
+     TABLE COLUMNS
+  --------------------------------------------------------- */
 
   const transactionColumns = [
     {
@@ -832,6 +887,15 @@ export default function ItemsLedgerPage() {
       ),
     },
     {
+      key: "warehouse",
+      label: "Warehouse",
+      render: (row) => (
+        <span className="text-slate-600 dark:text-slate-300">
+          {row.location || "—"}
+        </span>
+      ),
+    },
+    {
       key: "uom",
       label: "UOM",
       render: (row) => row.uom || "—",
@@ -852,25 +916,29 @@ export default function ItemsLedgerPage() {
       key: "transaction_rate",
       label: "Transaction rate",
       numeric: true,
-      render: (row) => formatAmount(row.transaction_rate),
+      render: (row) => formatRate(row.transaction_rate),
     },
     {
       key: "old_rate",
-      label: "Old rate",
+      label: "Old AVCO",
       numeric: true,
-      render: (row) => formatAmount(row.old_rate),
+      render: (row) => formatRate(row.old_rate),
     },
     {
       key: "actual_rate",
       label: "Actual rate",
       numeric: true,
-      render: (row) => formatAmount(row.actual_rate),
+      render: (row) => formatRate(row.actual_rate),
     },
     {
       key: "new_rate",
-      label: "New rate",
+      label: "New AVCO",
       numeric: true,
-      render: (row) => formatAmount(row.new_rate),
+      render: (row) => (
+        <span className="font-semibold text-indigo-700 dark:text-indigo-300">
+          {formatRate(row.new_rate)}
+        </span>
+      ),
     },
     {
       key: "receive_quantity",
@@ -886,7 +954,7 @@ export default function ItemsLedgerPage() {
       key: "receive_rate",
       label: "Receive rate",
       numeric: true,
-      render: (row) => formatAmount(row.receive_rate),
+      render: (row) => formatRate(row.receive_rate),
     },
     {
       key: "receive_amount",
@@ -908,7 +976,7 @@ export default function ItemsLedgerPage() {
       key: "issue_rate",
       label: "Issue rate",
       numeric: true,
-      render: (row) => formatAmount(row.issue_rate),
+      render: (row) => formatRate(row.issue_rate),
     },
     {
       key: "issue_amount",
@@ -918,7 +986,7 @@ export default function ItemsLedgerPage() {
     },
     {
       key: "running_total",
-      label: "Running total",
+      label: "Running quantity",
       numeric: true,
       render: (row) => (
         <span className="font-bold text-slate-900 dark:text-white">
@@ -926,14 +994,36 @@ export default function ItemsLedgerPage() {
         </span>
       ),
     },
+    {
+      key: "average_cost",
+      label: "Running AVCO",
+      numeric: true,
+      render: (row) => (
+        <span className="font-bold text-indigo-700 dark:text-indigo-300">
+          {formatRate(row.average_cost)}
+        </span>
+      ),
+    },
+    {
+      key: "running_inventory_value",
+      label: "Inventory value",
+      numeric: true,
+      render: (row) => (
+        <span className="font-semibold text-slate-900 dark:text-white">
+          {formatAmount(row.running_inventory_value)}
+        </span>
+      ),
+    },
   ];
 
-  // Only the columns the user has ticked in the Columns dropdown
   const visibleColumns = transactionColumns.filter(
     (column) => ledgerCols.visible[column.key]
   );
 
-  // Wait for permission verification before displaying the page.
+  /* ---------------------------------------------------------
+     PERMISSION LOADING / ACCESS DENIED
+  --------------------------------------------------------- */
+
   if (permissionLoading) {
     return (
       <main className="flex min-h-[70vh] items-center justify-center bg-slate-50 dark:bg-slate-950">
@@ -947,7 +1037,6 @@ export default function ItemsLedgerPage() {
     );
   }
 
-  // Fail closed if permission could not be verified or View is disabled.
   if (!canView) {
     return (
       <div>
@@ -961,8 +1050,14 @@ export default function ItemsLedgerPage() {
     );
   }
 
+  /* =========================================================
+     PAGE UI
+  ========================================================= */
+
   return (
     <main className="min-h-screen space-y-6 bg-slate-50/70 pb-10 dark:bg-slate-950">
+      {/* HEADER */}
+
       <section className="relative isolate overflow-hidden rounded-3xl bg-gradient-to-br from-indigo-700 via-indigo-600 to-violet-700 px-6 py-7 text-white shadow-lg shadow-indigo-900/10 sm:px-8 sm:py-9">
         <div className="pointer-events-none absolute -right-10 -top-24 -z-10 h-72 w-72 rounded-full bg-white/10 blur-3xl" />
         <div className="pointer-events-none absolute -bottom-32 right-1/3 -z-10 h-64 w-64 rounded-full bg-violet-300/20 blur-3xl" />
@@ -979,8 +1074,8 @@ export default function ItemsLedgerPage() {
             </h1>
 
             <p className="mt-3 max-w-xl text-sm leading-6 text-indigo-100 sm:text-base">
-              Track item movements, review stock balances, and analyze
-              receiving and issuing transactions.
+              Track item movements, review warehouse stock balances, and
+              analyze perpetual moving weighted average inventory valuation.
             </p>
 
             <div className="mt-5 flex flex-wrap items-center gap-3 text-sm text-indigo-100">
@@ -991,7 +1086,7 @@ export default function ItemsLedgerPage() {
               <span className="hidden h-1 w-1 rounded-full bg-indigo-200 sm:block" />
               <span className="inline-flex items-center gap-2">
                 <Warehouse size={16} />
-                Warehouse movement
+                Warehouse-wise AVCO
               </span>
             </div>
           </div>
@@ -1023,6 +1118,8 @@ export default function ItemsLedgerPage() {
         </div>
       </section>
 
+      {/* ERROR */}
+
       {error && (
         <div
           role="alert"
@@ -1040,6 +1137,8 @@ export default function ItemsLedgerPage() {
           </button>
         </div>
       )}
+
+      {/* FILTERS */}
 
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
         <div className="flex flex-col justify-between gap-3 border-b border-slate-100 px-5 py-5 dark:border-slate-800 sm:flex-row sm:items-center sm:px-7">
@@ -1158,6 +1257,7 @@ export default function ItemsLedgerPage() {
                 <option value="">
                   {loadingProducts ? "Loading items..." : "Select an item"}
                 </option>
+
                 {filteredProducts.map((product) => (
                   <option
                     key={product.product_id}
@@ -1168,6 +1268,7 @@ export default function ItemsLedgerPage() {
                   </option>
                 ))}
               </select>
+
               <ChevronDown
                 size={16}
                 className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400"
@@ -1204,6 +1305,8 @@ export default function ItemsLedgerPage() {
         </div>
       </section>
 
+      {/* SELECTED PRODUCT */}
+
       {selectedProduct && (
         <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-6">
           <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
@@ -1211,6 +1314,7 @@ export default function ItemsLedgerPage() {
               <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-md shadow-indigo-600/20">
                 <Package size={27} />
               </div>
+
               <div className="min-w-0">
                 <p className="text-xs font-semibold uppercase tracking-wider text-indigo-600 dark:text-indigo-300">
                   Selected item
@@ -1225,17 +1329,30 @@ export default function ItemsLedgerPage() {
               </div>
             </div>
 
-            <div className="rounded-xl bg-emerald-50 px-5 py-4 dark:bg-emerald-500/10">
-              <p className="text-xs font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">
-                Closing stock
-              </p>
-              <p className="mt-1 text-2xl font-bold text-emerald-700 dark:text-emerald-300">
-                {formatNumber(totals.current_stock)}
-              </p>
+            <div className="grid grid-cols-2 gap-3 sm:min-w-72">
+              <div className="rounded-xl bg-emerald-50 px-4 py-3 dark:bg-emerald-500/10">
+                <p className="text-xs font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">
+                  Closing quantity
+                </p>
+                <p className="mt-1 text-xl font-bold text-emerald-700 dark:text-emerald-300">
+                  {formatNumber(totals.current_stock)}
+                </p>
+              </div>
+
+              <div className="rounded-xl bg-indigo-50 px-4 py-3 dark:bg-indigo-500/10">
+                <p className="text-xs font-semibold uppercase tracking-wider text-indigo-700 dark:text-indigo-300">
+                  Closing AVCO
+                </p>
+                <p className="mt-1 text-xl font-bold text-indigo-700 dark:text-indigo-300">
+                  {formatRate(totals.closing_average_cost)}
+                </p>
+              </div>
             </div>
           </div>
         </section>
       )}
+
+      {/* VALUATION SUMMARY */}
 
       {selectedProduct && (
         <>
@@ -1247,6 +1364,7 @@ export default function ItemsLedgerPage() {
               icon={Layers3}
               color="indigo"
             />
+
             <SummaryCard
               title="Received quantity"
               value={formatNumber(totals.received_quantity)}
@@ -1254,6 +1372,7 @@ export default function ItemsLedgerPage() {
               icon={ArrowDownRight}
               color="emerald"
             />
+
             <SummaryCard
               title="Issued quantity"
               value={formatNumber(totals.issued_quantity)}
@@ -1261,14 +1380,135 @@ export default function ItemsLedgerPage() {
               icon={ArrowUpRight}
               color="rose"
             />
+
             <SummaryCard
               title="Closing stock"
               value={formatNumber(totals.current_stock)}
-              description="Closing balance from the API"
+              description="Closing quantity for selected scope"
               icon={Warehouse}
               color="violet"
             />
           </section>
+
+          <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <SummaryCard
+              title="Opening inventory value"
+              value={formatAmount(totals.opening_inventory_value)}
+              description="Inventory value before the period"
+              icon={Layers3}
+              color="indigo"
+            />
+
+            <SummaryCard
+              title="Received value"
+              value={formatAmount(totals.receive_amount)}
+              description="Total receipt value during the period"
+              icon={ArrowDownRight}
+              color="emerald"
+            />
+
+            <SummaryCard
+              title="Issued value"
+              value={formatAmount(totals.issue_amount)}
+              description="Total issue value during the period"
+              icon={ArrowUpRight}
+              color="rose"
+            />
+
+            <SummaryCard
+              title="Closing inventory value"
+              value={formatAmount(totals.closing_inventory_value)}
+              description="Closing stock value at AVCO"
+              icon={Warehouse}
+              color="violet"
+            />
+          </section>
+
+          {/* WAREHOUSE-WISE CLOSING BALANCES */}
+
+          {warehouseBalances.length > 0 && !location && (
+            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+              <div className="border-b border-slate-100 px-5 py-5 dark:border-slate-800 sm:px-6">
+                <div className="flex items-center gap-3">
+                  <div className="rounded-xl bg-indigo-50 p-2.5 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-300">
+                    <Warehouse size={21} />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-bold text-slate-900 dark:text-white">
+                      Warehouse-wise valuation
+                    </h2>
+                    <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                      Each warehouse maintains its own moving average cost.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 dark:bg-slate-800/70">
+                    <tr>
+                      <th className="px-5 py-3 text-left text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Warehouse
+                      </th>
+                      <th className="px-5 py-3 text-right text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Closing quantity
+                      </th>
+                      <th className="px-5 py-3 text-right text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Average cost
+                      </th>
+                      <th className="px-5 py-3 text-right text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Inventory value
+                      </th>
+                    </tr>
+                  </thead>
+
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {warehouseBalances.map((warehouse, index) => (
+                      <tr
+                        key={
+                          warehouse.warehouse_id ??
+                          `${warehouse.location || "warehouse"}-${index}`
+                        }
+                      >
+                        <td className="px-5 py-4 font-semibold text-slate-800 dark:text-slate-100">
+                          {warehouse.location || "Unassigned warehouse"}
+                        </td>
+                        <td className="px-5 py-4 text-right tabular-nums text-slate-600 dark:text-slate-300">
+                          {formatNumber(warehouse.quantity)}
+                        </td>
+                        <td className="px-5 py-4 text-right tabular-nums font-semibold text-indigo-700 dark:text-indigo-300">
+                          {formatRate(warehouse.average_cost)}
+                        </td>
+                        <td className="px-5 py-4 text-right tabular-nums font-bold text-slate-900 dark:text-white">
+                          {formatAmount(warehouse.inventory_value)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
+          {/* VALUATION WARNING */}
+
+          {totals.valuation_warnings > 0 && (
+            <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+              <AlertCircle size={20} className="mt-0.5 shrink-0" />
+              <div>
+                <p className="text-sm font-bold">
+                  Inventory valuation requires attention
+                </p>
+                <p className="mt-1 text-sm leading-6">
+                  The API reported {totals.valuation_warnings} transaction(s)
+                  where the available stock balance was insufficient to
+                  calculate a normal AVCO issue. Review those transactions
+                  before relying on the closing valuation.
+                </p>
+              </div>
+            </div>
+          )}
 
           <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -1306,7 +1546,8 @@ export default function ItemsLedgerPage() {
         </>
       )}
 
-      {/* No overflow-hidden here, so the Columns dropdown is never clipped */}
+      {/* TRANSACTION HISTORY */}
+
       <section className="rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
         <div className="flex flex-col justify-between gap-4 rounded-t-2xl border-b border-slate-100 px-5 py-5 dark:border-slate-800 sm:flex-row sm:items-center sm:px-7">
           <div className="flex items-center gap-3">
@@ -1318,7 +1559,7 @@ export default function ItemsLedgerPage() {
                 Transaction history
               </h2>
               <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                Detailed stock movement, rates, amounts, and running balance.
+                Stock movement, receipt and issue rates, AVCO, and inventory value.
               </p>
             </div>
           </div>
@@ -1328,7 +1569,6 @@ export default function ItemsLedgerPage() {
               {filteredLedger.length} records
             </span>
 
-            {/* COLUMN PICKER */}
             <ColumnToggle columns={LEDGER_COLUMNS} state={ledgerCols} />
 
             <button
@@ -1368,10 +1608,11 @@ export default function ItemsLedgerPage() {
                 key={option.value}
                 type="button"
                 onClick={() => setTransactionFilter(option.value)}
-                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${transactionFilter === option.value
-                  ? "bg-indigo-600 text-white"
-                  : "bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
-                  }`}
+                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                  transactionFilter === option.value
+                    ? "bg-indigo-600 text-white"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+                }`}
               >
                 {option.label}
               </button>
@@ -1379,8 +1620,6 @@ export default function ItemsLedgerPage() {
           </div>
         </div>
 
-        {/* The scrollbar appears only when the visible columns are wider
-            than the container. */}
         <div className="w-full overflow-x-auto [scrollbar-width:thin]">
           <table className="w-full border-collapse text-sm">
             <thead>
@@ -1388,8 +1627,9 @@ export default function ItemsLedgerPage() {
                 {visibleColumns.map((column) => (
                   <th
                     key={column.key}
-                    className={`whitespace-nowrap border-b border-slate-200 px-4 py-4 text-xs font-bold uppercase tracking-wider text-slate-500 dark:border-slate-700 dark:text-slate-400 ${column.numeric ? "text-right" : "text-left"
-                      }`}
+                    className={`whitespace-nowrap border-b border-slate-200 px-4 py-4 text-xs font-bold uppercase tracking-wider text-slate-500 dark:border-slate-700 dark:text-slate-400 ${
+                      column.numeric ? "text-right" : "text-left"
+                    }`}
                   >
                     {column.label}
                   </th>
@@ -1400,7 +1640,10 @@ export default function ItemsLedgerPage() {
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {loadingLedger ? (
                 <tr>
-                  <td colSpan={visibleColumns.length} className="px-5 py-16">
+                  <td
+                    colSpan={Math.max(visibleColumns.length, 1)}
+                    className="px-5 py-16"
+                  >
                     <div className="flex flex-col items-center justify-center gap-3 text-slate-500 dark:text-slate-400">
                       <LoaderCircle
                         size={30}
@@ -1414,16 +1657,21 @@ export default function ItemsLedgerPage() {
                 </tr>
               ) : filteredLedger.length === 0 ? (
                 <tr>
-                  <td colSpan={visibleColumns.length} className="px-5 py-16">
+                  <td
+                    colSpan={Math.max(visibleColumns.length, 1)}
+                    className="px-5 py-16"
+                  >
                     <div className="flex flex-col items-center justify-center text-center">
                       <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500">
                         <FileSpreadsheet size={25} />
                       </div>
+
                       <p className="font-semibold text-slate-800 dark:text-slate-100">
                         {hasSearched
                           ? "No transactions found"
                           : "Your ledger is ready"}
                       </p>
+
                       <p className="mt-2 max-w-md text-sm leading-6 text-slate-500 dark:text-slate-400">
                         {hasSearched
                           ? "Try changing the date range, location, or transaction search filters."
@@ -1444,10 +1692,11 @@ export default function ItemsLedgerPage() {
                     {visibleColumns.map((column) => (
                       <td
                         key={column.key}
-                        className={`whitespace-nowrap px-4 py-4 text-slate-600 dark:text-slate-300 ${column.numeric
-                          ? "text-right tabular-nums"
-                          : "text-left"
-                          }`}
+                        className={`whitespace-nowrap px-4 py-4 text-slate-600 dark:text-slate-300 ${
+                          column.numeric
+                            ? "text-right tabular-nums"
+                            : "text-left"
+                        }`}
                       >
                         {column.render(row)}
                       </td>
@@ -1464,6 +1713,7 @@ export default function ItemsLedgerPage() {
             <p className="text-xs text-slate-500 dark:text-slate-400">
               Showing {filteredLedger.length} of {ledger.length} transaction records
             </p>
+
             <p className="inline-flex items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
               <CheckCircle2 size={15} className="text-emerald-500" />
               Ledger data loaded from your ERP
@@ -1473,12 +1723,11 @@ export default function ItemsLedgerPage() {
       </section>
 
       <p className="px-1 text-xs leading-5 text-slate-400 dark:text-slate-500">
-        Quantities, rates, amounts, and running totals are displayed using
-        the values returned by your Items Ledger API.
+        AVCO is calculated separately for each warehouse. When all locations
+        are selected, the displayed closing average is a combined reporting
+        figure; it is not the issue cost used by individual warehouses.
       </p>
 
-      {/* Permission flags are available for future CRUD controls.
-          This ledger currently has no create, edit, or delete actions. */}
       <span className="hidden" aria-hidden="true">
         {String(canCreate)} {String(canUpdate)} {String(canDelete)}
       </span>

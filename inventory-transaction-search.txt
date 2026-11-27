@@ -1,0 +1,48 @@
+﻿
+
+Path       : D:\next js course\erp-software\app\api\assembly-build\[id]\approve\route.js
+LineNumber : 377
+Line       :         INSERT INTO inventory_transactions (
+
+Path       : D:\next js course\erp-software\app\api\assembly-unbuild\[id]\approve\route.js
+LineNumber : 644
+Line       :                 INSERT INTO inventory_transactions (
+
+Path       : D:\next js course\erp-software\app\api\item-receipts\[id]\approve\route.js
+LineNumber : 754
+Line       :                 INSERT INTO inventory_transactions (
+
+Path       : D:\next js course\erp-software\app\api\purchase-invoices\[id]\approve\route.js
+LineNumber : 483
+Line       :                     INSERT INTO inventory_transactions (
+
+Path       : D:\next js course\erp-software\app\api\purchases\route.js
+LineNumber : 599
+Line       :         INSERT INTO inventory_transactions (
+
+Path       : D:\next js course\erp-software\app\api\purchases\route.js
+LineNumber : 1379
+Line       :       DELETE FROM inventory_transactions
+
+Path       : D:\next js course\erp-software\app\api\purchases\route.js
+LineNumber : 1612
+Line       :         INSERT INTO inventory_transactions (
+
+Path       : D:\next js course\erp-software\app\api\sales-invoices\route.js
+LineNumber : 815
+Line       :         INSERT INTO inventory_transactions (
+
+Path       : D:\next js course\erp-software\app\api\sales-invoices\[id]\route.js
+LineNumber : 580
+Line       :       DELETE FROM inventory_transactions
+
+Path       : D:\next js course\erp-software\app\api\sales-invoices\[id]\route.js
+LineNumber : 774
+Line       :         INSERT INTO inventory_transactions (
+
+Path       : D:\next js course\erp-software\app\api\sales-returns\[id]\approve\route.js
+LineNumber : 337
+Line       :         INSERT INTO inventory_transactions (
+
+
+

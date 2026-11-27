@@ -792,6 +792,22 @@ function EmptyState({
    PRODUCTS PAGE
 ========================================================= */
 
+function displayPrice(product, subProducts, field) {
+  const own = Number(product?.[field] ?? 0);
+  if (own > 0) return money(own);
+
+  const prices = (subProducts || [])
+    .map((s) => Number(s?.[field] ?? 0))
+    .filter((n) => Number.isFinite(n) && n > 0);
+
+  if (prices.length === 0) return money(0);
+
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+
+  return min === max ? money(min) : `${money(min)} – ${money(max)}`;
+}
+
 export default function ProductsPage() {
   /* -------------------------------------------------------
      STATE
@@ -1862,10 +1878,7 @@ export default function ProductsPage() {
         }
       );
 
-      await Promise.all([
-        loadVariants(productId),
-        loadStock(),
-      ]);
+      await Promise.all([loadVariants(productId), loadProducts(), loadStock()]);
 
       clearVariantForm();
 
@@ -2456,6 +2469,8 @@ export default function ProductsPage() {
                     ) : (
                       filteredProducts.map((product) => {
                         const id = getProductId(product);
+const subs =
+  subProductsByProduct[String(id)] ?? product.sub_products ?? [];
 
                         const stock =
                           productStock.get(String(id)) ?? 0;
@@ -2562,7 +2577,7 @@ export default function ProductsPage() {
 
                             {productCols.visible.cost && (
                               <td className="whitespace-nowrap px-4 py-4 text-right tabular-nums text-slate-600">
-                                {money(product.cost_price)}
+                                {displayPrice(product, subs, "cost_price")}
                               </td>
                             )}
 
@@ -2571,7 +2586,7 @@ export default function ProductsPage() {
                             {productCols.visible.sale && (
                               <td className="whitespace-nowrap px-4 py-4 text-right">
                                 <span className="font-bold tabular-nums text-slate-900">
-                                  {money(product.sale_price)}
+                                  {displayPrice(product, subs, "sale_price")}
                                 </span>
                               </td>
                             )}
