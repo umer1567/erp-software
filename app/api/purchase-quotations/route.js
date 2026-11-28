@@ -257,40 +257,63 @@ function calculateTotals(lines) {
 }
 
 async function getNextQuotationNumber(client, companyId) {
-  await client.query(
-    "SELECT pg_advisory_xact_lock($1::INTEGER, $2::INTEGER)",
-    [companyId, 741206]
-  );
+  const numericCompanyId = Number(companyId);
 
-  // Include archived quotations so their numbers are never reused.
-  const result = await client.query(
-    `
-    SELECT
-      COALESCE(
-        MAX(
-          NULLIF(
-            REGEXP_REPLACE(
-              quotation_number,
-              '[^0-9]',
-              '',
-              'g'
-            ),
-            ''
-          )::BIGINT
-        ),
-        0
-      ) + 1 AS next_number
-    FROM purchase_quotations
-    WHERE company_id = $1
-    `,
-    [companyId]
-  );
+  if (
+    !Number.isSafeInteger(numericCompanyId) ||
+    numericCompanyId <= 0
+  ) {
+    throw validationError(
+      "Invalid company ID for Purchase Quotation numbering."
+    );
+  }
 
-  return `PQ-${String(
-    result.rows[0].next_number
-  ).padStart(6, "0")}`;
+  const sequenceName =
+    `purchase_quotation_company_${numericCompanyId}_seq`;
+
+  // Create the company's sequence in the central database.
+  await pool.query(`
+    CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+    START WITH 1
+    INCREMENT BY 1
+  `);
+
+  // Skip numbers already used by existing or archived quotations.
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    const sequenceResult = await pool.query(
+      `
+      SELECT nextval($1::regclass)::TEXT AS sequence_value
+      `,
+      [`public.${sequenceName}`]
+    );
+
+    const sequenceValue =
+      sequenceResult.rows[0].sequence_value;
+
+    const quotationNumber =
+      `PQ-${String(sequenceValue).padStart(6, "0")}`;
+
+    const existingResult = await client.query(
+      `
+      SELECT 1
+      FROM purchase_quotations
+      WHERE
+        company_id = $1
+        AND quotation_number = $2
+      LIMIT 1
+      `,
+      [numericCompanyId, quotationNumber]
+    );
+
+    if (existingResult.rowCount === 0) {
+      return quotationNumber;
+    }
+  }
+
+  throw new Error(
+    "Could not generate a unique Purchase Quotation number."
+  );
 }
-
 /* -------------------------------------------------------------------------- */
 /* GET: Purchase quotation history and dropdown data                          */
 /* -------------------------------------------------------------------------- */

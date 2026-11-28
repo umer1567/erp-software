@@ -1,5 +1,6 @@
 
 import { NextResponse } from "next/server";
+import pool from "@/lib/db";
 import { getTenantContext, unauthorizedResponse } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
@@ -14,6 +15,71 @@ function errorResponse(message, status = 500) {
     return NextResponse.json(
         { success: false, message },
         { status }
+    );
+}
+
+// =====================================================
+// PURCHASE PAYMENT NUMBER GENERATION
+// Central sequence: independent per company
+// =====================================================
+
+async function getNextPurchasePaymentNumber(
+    companyId,
+    tenantClient
+) {
+    const numericCompanyId = Number(companyId);
+
+    if (
+        !Number.isSafeInteger(numericCompanyId) ||
+        numericCompanyId <= 0
+    ) {
+        throw new Error(
+            "Invalid company ID for Purchase Payment numbering."
+        );
+    }
+
+    const sequenceName =
+        `purchase_payment_company_${numericCompanyId}_seq`;
+
+    // Create sequence in the central ERP database.
+    await pool.query(`
+        CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+        START WITH 1
+        INCREMENT BY 1
+    `);
+
+    // Check existing payments, including archived records.
+    for (let attempt = 0; attempt < 1000; attempt++) {
+        const sequenceResult = await pool.query(
+            `
+            SELECT nextval($1::regclass)::TEXT AS sequence_value
+            `,
+            [`public.${sequenceName}`]
+        );
+
+        const sequenceValue =
+            sequenceResult.rows[0].sequence_value;
+
+        const paymentNumber =
+            `PPAY-${String(sequenceValue).padStart(6, "0")}`;
+
+        const existingResult = await tenantClient.query(
+            `
+            SELECT 1
+            FROM purchase_payments
+            WHERE payment_number = $1
+            LIMIT 1
+            `,
+            [paymentNumber]
+        );
+
+        if (existingResult.rowCount === 0) {
+            return paymentNumber;
+        }
+    }
+
+    throw new Error(
+        "Could not generate a unique Purchase Payment number."
     );
 }
 
@@ -131,14 +197,13 @@ export async function POST(request) {
         const body = await request.json();
 
         const {
-            paymentNumber,
-            purchaseId,
-            paymentDate,
-            amount,
-            paymentMethod,
-            referenceNumber,
-            notes,
-        } = body;
+    purchaseId,
+    paymentDate,
+    amount,
+    paymentMethod,
+    referenceNumber,
+    notes,
+} = body;
 
         if (!purchaseId) {
             return errorResponse(
@@ -192,7 +257,10 @@ export async function POST(request) {
         }
 
         const finalPaymentNumber =
-            paymentNumber?.trim() || `PPAY-${Date.now()}`;
+    await getNextPurchasePaymentNumber(
+        tenant.companyId,
+        client
+    );
 
         const paymentResult = await client.query(
             `
@@ -312,7 +380,7 @@ export async function PUT(request) {
             body.id;
 
         const {
-            paymentNumber,
+            // paymentNumber,
             purchaseId,
             paymentDate,
             amount,
@@ -347,14 +415,14 @@ export async function PUT(request) {
             );
         }
 
-        const finalPaymentNumber = paymentNumber?.trim();
+        // const finalPaymentNumber = paymentNumber?.trim();
 
-        if (!finalPaymentNumber) {
-            return errorResponse(
-                "Payment number is required.",
-                400
-            );
-        }
+        // if (!finalPaymentNumber) {
+        //     return errorResponse(
+        //         "Payment number is required.",
+        //         400
+        //     );
+        // }
 
         client = await db.connect();
 
@@ -420,25 +488,25 @@ export async function PUT(request) {
         }
 
         // Check for a duplicate payment number, excluding this payment.
-        const duplicateResult = await client.query(
-            `
-                SELECT payment_id
-                FROM purchase_payments
-                WHERE payment_number = $1
-                  AND payment_id <> $2
-                LIMIT 1
-            `,
-            [finalPaymentNumber, paymentId]
-        );
+        // const duplicateResult = await client.query(
+        //     `
+        //         SELECT payment_id
+        //         FROM purchase_payments
+        //         WHERE payment_number = $1
+        //           AND payment_id <> $2
+        //         LIMIT 1
+        //     `,
+        //     [finalPaymentNumber, paymentId]
+        // );
 
-        if (duplicateResult.rows.length > 0) {
-            await client.query("ROLLBACK");
+        // if (duplicateResult.rows.length > 0) {
+        //     await client.query("ROLLBACK");
 
-            return errorResponse(
-                "Payment number already exists.",
-                409
-            );
-        }
+        //     return errorResponse(
+        //         "Payment number already exists.",
+        //         409
+        //     );
+        // }
 
         const samePurchase =
             oldPurchaseId === newPurchaseId;
@@ -457,32 +525,30 @@ export async function PUT(request) {
 
         // Update the payment details.
         const updatedPaymentResult = await client.query(
-            `
-                UPDATE purchase_payments
-                SET
-                    payment_number = $1,
-                    purchase_id = $2,
-                    supplier_id = $3,
-                    payment_date = COALESCE($4::DATE, CURRENT_DATE),
-                    amount = $5,
-                    payment_method = $6,
-                    reference_number = $7,
-                    notes = $8
-                WHERE payment_id = $9
-                RETURNING *
-            `,
-            [
-                finalPaymentNumber,
-                newPurchaseId,
-                newPurchase.supplier_id,
-                paymentDate || null,
-                paymentAmount,
-                paymentMethod || "CASH",
-                referenceNumber || null,
-                notes || null,
-                paymentId,
-            ]
-        );
+    `
+        UPDATE purchase_payments
+        SET
+            purchase_id = $1,
+            supplier_id = $2,
+            payment_date = COALESCE($3::DATE, CURRENT_DATE),
+            amount = $4,
+            payment_method = $5,
+            reference_number = $6,
+            notes = $7
+        WHERE payment_id = $8
+        RETURNING *
+    `,
+    [
+        newPurchaseId,
+        newPurchase.supplier_id,
+        paymentDate || null,
+        paymentAmount,
+        paymentMethod || "CASH",
+        referenceNumber || null,
+        notes || null,
+        paymentId,
+    ]
+);
 
         if (samePurchase) {
             // Recalculate using the original paid amount, replacing

@@ -1,6 +1,6 @@
 
 import { NextResponse } from "next/server";
-import { getOperationalPool } from "@/lib/db";
+import centralDb, { getOperationalPool } from "@/lib/db";
 import { authorizeSalesQuotations } from "@/lib/sales-quotations-auth";
 
 export const runtime = "nodejs";
@@ -10,6 +10,58 @@ function jsonError(message, status = 400) {
     return NextResponse.json(
         { success: false, message },
         { status }
+    );
+}
+
+async function getNextQuotationNumber(companyId, tenantClient) {
+    const numericCompanyId = Number(companyId);
+
+    if (
+        !Number.isSafeInteger(numericCompanyId) ||
+        numericCompanyId <= 0
+    ) {
+        throw new Error("Invalid company ID for quotation numbering.");
+    }
+
+    const sequenceName =
+        `sales_quotation_company_${numericCompanyId}_seq`;
+
+    await centralDb.query(`
+        CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+        START WITH 1
+        INCREMENT BY 1
+    `);
+
+    for (let attempt = 0; attempt < 1000; attempt++) {
+        const result = await centralDb.query(
+            `
+            SELECT nextval($1::regclass)::TEXT AS sequence_value
+            `,
+            [`public.${sequenceName}`]
+        );
+
+        const sequenceValue = result.rows[0].sequence_value;
+
+        const quotationNumber =
+            `QO-${String(sequenceValue).padStart(6, "0")}`;
+
+        const existing = await tenantClient.query(
+            `
+            SELECT 1
+            FROM sales_quotations
+            WHERE quotation_number = $1
+            LIMIT 1
+            `,
+            [quotationNumber]
+        );
+
+        if (existing.rowCount === 0) {
+            return quotationNumber;
+        }
+    }
+
+    throw new Error(
+        "Could not generate a unique sales quotation number."
     );
 }
 
@@ -405,25 +457,10 @@ export async function POST(request) {
         }
 
         // Atomically reserve the next quotation number for this company.
-        const counter = await client.query(
-            `
-            INSERT INTO sales_quotation_counters (
-                company_id,
-                last_number
-            )
-            VALUES ($1, 1)
-            ON CONFLICT (company_id)
-            DO UPDATE SET
-                last_number = sales_quotation_counters.last_number + 1
-            RETURNING last_number
-            `,
-            [companyId]
-        );
-
-        const quotationNumber = `QO-${String(
-            counter.rows[0].last_number
-        ).padStart(6, "0")}`;
-
+        const quotationNumber = await getNextQuotationNumber(
+    companyId,
+    client
+);
         const inserted = await client.query(
             `
             INSERT INTO sales_quotations (

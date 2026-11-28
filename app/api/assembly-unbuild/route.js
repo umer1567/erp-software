@@ -1,6 +1,6 @@
 
 import { NextResponse } from "next/server";
-import { getTenantDb } from "@/lib/db";
+import pool, { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
 
@@ -91,44 +91,90 @@ function isValidDate(value) {
     );
 }
 
-async function getItemBalance(
-    client,
-    companyId,
-    warehouseId,
-    productId,
-    subProductId
-) {
-    if (subProductId) {
-        const result = await client.query(
-            `
-            SELECT COALESCE(quantity, 0) AS quantity
-            FROM sub_product_stock
-            WHERE company_id = $1
-              AND warehouse_id = $2
-              AND sub_product_id = $3
-            LIMIT 1
-            `,
-            [companyId, warehouseId, subProductId]
-        );
+// =========================================================
+// CENTRAL COMPANY-SPECIFIC ASSEMBLY UNBUILD NUMBER
+// =========================================================
 
-        return Number(result.rows[0]?.quantity || 0);
+async function getNextAssemblyUnbuildNumber(companyId, tenantClient) {
+    const safeCompanyId = Number(companyId);
+
+    if (!Number.isInteger(safeCompanyId) || safeCompanyId <= 0) {
+        throw new ApiError("Invalid company ID for transaction numbering.");
     }
 
-    const result = await client.query(
+    const sequenceName =
+        `assembly_unbuild_company_${safeCompanyId}_seq`;
+
+    const sequenceReference = `public.${sequenceName}`;
+
+    // Create the central sequence if it does not exist.
+    await pool.query(`
+        CREATE SEQUENCE IF NOT EXISTS
+        public."${sequenceName}"
+        START WITH 1
+        INCREMENT BY 1
+        MINVALUE 1
+        NO CYCLE
+    `);
+
+    // Read the highest number already used in this tenant.
+    // Archived records are included to prevent number reuse.
+    const existingResult = await tenantClient.query(
         `
-        SELECT COALESCE(quantity, 0) AS quantity
-        FROM stock
+        SELECT COALESCE(
+            MAX(SUBSTRING(transaction_number FROM 4)::BIGINT),
+            0
+        ) AS last_number
+        FROM assembly_unbuilds
         WHERE company_id = $1
-          AND warehouse_id = $2
-          AND product_id = $3
-        LIMIT 1
+          AND transaction_number ~ '^AU-[0-9]+$'
         `,
-        [companyId, warehouseId, productId]
+        [safeCompanyId]
     );
 
-    return Number(result.rows[0]?.quantity || 0);
-}
+    const existingNumber = Number(
+        existingResult.rows[0]?.last_number || 0
+    );
 
+    // Read the current central sequence position.
+    const sequenceResult = await pool.query(
+        `
+        SELECT last_value, is_called
+        FROM public."${sequenceName}"
+        `
+    );
+
+    const sequenceState = sequenceResult.rows[0];
+
+    const sequenceNumber = sequenceState.is_called
+        ? Number(sequenceState.last_value)
+        : 0;
+
+    // Synchronize against both existing tenant records
+    // and the central sequence.
+    const nextNumber =
+        Math.max(existingNumber, sequenceNumber) + 1;
+
+    if (!Number.isSafeInteger(nextNumber) || nextNumber <= 0) {
+        throw new ApiError(
+            "Unable to generate Assembly Unbuild transaction number.",
+            500
+        );
+    }
+
+    await pool.query(
+        `
+        SELECT setval(
+            $1::regclass,
+            $2,
+            TRUE
+        )
+        `,
+        [sequenceReference, nextNumber]
+    );
+
+    return `AU-${String(nextNumber).padStart(6, "0")}`;
+}
 // =========================================================
 // GET: LIST ACTIVE ASSEMBLY UNBUILD TRANSACTIONS
 // =========================================================
@@ -634,51 +680,23 @@ export async function POST(request) {
         // Include archived records to prevent number reuse.
         // -------------------------------------------------
 
-        await client.query(
-            `
-            SELECT pg_advisory_xact_lock(
-                $1::integer,
-                hashtext('assembly_unbuild')::integer
-            )
-            `,
-            [companyId]
-        );
+        // -------------------------------------------------
+// GENERATE COMPANY-SPECIFIC TRANSACTION NUMBER
+// Central sequence + tenant advisory lock.
+// -------------------------------------------------
 
-        const numberResult = await client.query(
-            `
-            SELECT
-                COALESCE(
-                    MAX(
-                        NULLIF(
-                            SUBSTRING(transaction_number FROM 4),
-                            ''
-                        )::BIGINT
-                    ),
-                    0
-                ) + 1 AS next_number
+await client.query(
+    `
+    SELECT pg_advisory_xact_lock(
+        $1::integer,
+        hashtext('assembly_unbuild')::integer
+    )
+    `,
+    [companyId]
+);
 
-            FROM assembly_unbuilds
-
-            WHERE company_id = $1
-              AND transaction_number ~ '^AU-[0-9]+$'
-            `,
-            [companyId]
-        );
-
-        const nextNumber = Number(numberResult.rows[0].next_number);
-
-        if (
-            !Number.isSafeInteger(nextNumber) ||
-            nextNumber <= 0
-        ) {
-            throw new ApiError(
-                "Unable to generate Assembly Unbuild transaction number.",
-                500
-            );
-        }
-
-        const transactionNumber =
-            `AU-${String(nextNumber).padStart(6, "0")}`;
+const transactionNumber =
+    await getNextAssemblyUnbuildNumber(companyId, client);
 
         // -------------------------------------------------
         // CREATE DRAFT HEADER

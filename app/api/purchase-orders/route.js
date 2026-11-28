@@ -1,6 +1,6 @@
 
 import { NextResponse } from "next/server";
-import { getTenantDb } from "@/lib/db";
+import pool, { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
 
@@ -149,53 +149,81 @@ function getOrderNumberYear(orderDate) {
 /* Generate Purchase Order Number                                             */
 /* -------------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------------- */
+/* Generate Purchase Order Number                                             */
+/* -------------------------------------------------------------------------- */
+
 async function generatePurchaseOrderNumber(
     client,
     companyId,
     orderDate
 ) {
+    const numericCompanyId = Number(companyId);
     const year = getOrderNumberYear(orderDate);
 
-    await client.query(
-        "SELECT pg_advisory_xact_lock($1::integer, $2::integer)",
-        [companyId, 7142026]
+    if (
+        !Number.isSafeInteger(numericCompanyId) ||
+        numericCompanyId <= 0
+    ) {
+        throw validationError(
+            "Invalid company ID for Purchase Order numbering."
+        );
+    }
+
+    if (!/^\d{4}$/.test(year)) {
+        throw validationError(
+            "Invalid year for Purchase Order numbering."
+        );
+    }
+
+    // Separate sequence for each company and financial calendar year.
+    const sequenceName =
+        `purchase_order_company_${numericCompanyId}_${year}_seq`;
+
+    // Sequences are stored in the central ERP database.
+    await pool.query(`
+        CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+        START WITH 1
+        INCREMENT BY 1
+    `);
+
+    // Never reuse numbers already present in the tenant database,
+    // including numbers belonging to archived Purchase Orders.
+    for (let attempt = 0; attempt < 1000; attempt++) {
+        const sequenceResult = await pool.query(
+            `
+            SELECT nextval($1::regclass)::TEXT AS sequence_value
+            `,
+            [`public.${sequenceName}`]
+        );
+
+        const sequenceValue =
+            sequenceResult.rows[0].sequence_value;
+
+        const purchaseOrderNumber =
+            `PO-${year}-${String(sequenceValue).padStart(6, "0")}`;
+
+        const existingResult = await client.query(
+            `
+            SELECT 1
+            FROM purchase_orders
+            WHERE
+                company_id = $1
+                AND purchase_order_number = $2
+            LIMIT 1
+            `,
+            [numericCompanyId, purchaseOrderNumber]
+        );
+
+        if (existingResult.rowCount === 0) {
+            return purchaseOrderNumber;
+        }
+    }
+
+    throw new Error(
+        "Could not generate a unique Purchase Order number."
     );
-
-    const result = await client.query(
-        `
-        SELECT
-            COALESCE(
-                MAX(
-                    NULLIF(
-                        regexp_replace(
-                            purchase_order_number,
-                            '^PO-[0-9]{4}-',
-                            ''
-                        ),
-                        ''
-                    )::INTEGER
-                ),
-                0
-            ) AS last_number
-
-        FROM purchase_orders
-
-        WHERE
-            company_id = $1
-            AND purchase_order_number ~ $2
-        `,
-        [
-            companyId,
-            `^PO-${year}-[0-9]+$`,
-        ]
-    );
-
-    const nextNumber =
-        Number(result.rows[0]?.last_number || 0) + 1;
-
-    return `PO-${year}-${String(nextNumber).padStart(6, "0")}`;
 }
-
 /* -------------------------------------------------------------------------- */
 /* Validate Manual Purchase Order Items                                       */
 /* -------------------------------------------------------------------------- */

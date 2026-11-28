@@ -1,6 +1,6 @@
 
 import { NextResponse } from "next/server";
-import { getTenantDb } from "@/lib/db";
+import pool, { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission, hasPermission } from "@/lib/permissions";
 import { archiveAndSoftDelete } from "@/lib/recycle-bin";
@@ -16,72 +16,52 @@ import {
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-async function validateItems(client, data) {
-    if (data.assemblyProductId) {
-        const result = await client.query(
-            `
-            SELECT product_id
-            FROM products
-            WHERE product_id = $1
-              AND is_active = TRUE
-              AND deleted_at IS NULL
-            `,
-            [data.assemblyProductId]
+async function getNextBomNumber(companyId, tenantClient) {
+    const numericCompanyId = Number(companyId);
+
+    if (
+        !Number.isSafeInteger(numericCompanyId) ||
+        numericCompanyId <= 0
+    ) {
+        throw validationError("Invalid company ID for BOM numbering.");
+    }
+
+    const sequenceName = `bom_company_${numericCompanyId}_seq`;
+
+    await pool.query(`
+        CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+        START WITH 1
+        INCREMENT BY 1
+    `);
+
+    for (let attempt = 0; attempt < 1000; attempt++) {
+        const sequenceResult = await pool.query(
+            `SELECT nextval($1::regclass)::TEXT AS sequence_value`,
+            [`public.${sequenceName}`]
         );
 
-        if (!result.rowCount) {
-            throw validationError(
-                "Selected assembly product was not found or is inactive."
-            );
-        }
-    } else {
-        const result = await client.query(
+        const bomNumber =
+            `BOM-${String(sequenceResult.rows[0].sequence_value).padStart(6, "0")}`;
+
+        // Include soft-deleted BOMs so their numbers are never reused.
+        const existingResult = await tenantClient.query(
             `
-            SELECT sub_product_id
-            FROM sub_products
-            WHERE sub_product_id = $1
+            SELECT 1
+            FROM bill_of_materials
+            WHERE company_id = $1
+              AND bom_number = $2
+            LIMIT 1
             `,
-            [data.assemblySubProductId]
+            [numericCompanyId, bomNumber]
         );
 
-        if (!result.rowCount) {
-            throw validationError(
-                "Selected assembly sub-product was not found."
-            );
+        if (existingResult.rowCount === 0) {
+            return bomNumber;
         }
     }
 
-    for (const revision of data.revisions) {
-        for (const component of revision.components) {
-            const result = component.productId
-                ? await client.query(
-                    `
-                    SELECT product_id
-                    FROM products
-                    WHERE product_id = $1
-                      AND is_active = TRUE
-                      AND deleted_at IS NULL
-                    `,
-                    [component.productId]
-                )
-                : await client.query(
-                    `
-                    SELECT sub_product_id
-                    FROM sub_products
-                    WHERE sub_product_id = $1
-                    `,
-                    [component.subProductId]
-                );
-
-            if (!result.rowCount) {
-                throw validationError(
-                    "One of the selected BOM components was not found or is inactive."
-                );
-            }
-        }
-    }
+    throw new Error("Could not generate a unique BOM number.");
 }
-
 async function insertRevision(client, bomId, revision) {
     const revisionResult = await client.query(
         `
@@ -197,6 +177,7 @@ export async function GET() {
                 `
                 SELECT
                     b.bom_id,
+                    b.bom_number,
                     b.bom_name,
                     b.memo,
                     b.unit_of_measure,
@@ -289,33 +270,38 @@ export async function POST(request) {
 
         await validateItems(client, data);
 
-        const headerResult = await client.query(
-            `
-            INSERT INTO bill_of_materials (
-                company_id,
-                bom_name,
-                assembly_product_id,
-                assembly_sub_product_id,
-                memo,
-                unit_of_measure,
-                created_by,
-                updated_by
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-            RETURNING bom_id
-            `,
-            [
-                companyId,
-                data.bomName,
-                data.assemblyProductId,
-                data.assemblySubProductId,
-                data.memo,
-                data.unitOfMeasure,
-                userId,
-            ]
-        );
+const bomNumber = await getNextBomNumber(companyId, client);
 
-        const bomId = headerResult.rows[0].bom_id;
+const headerResult = await client.query(
+    `
+    INSERT INTO bill_of_materials (
+        company_id,
+        bom_number,
+        bom_name,
+        assembly_product_id,
+        assembly_sub_product_id,
+        memo,
+        unit_of_measure,
+        created_by,
+        updated_by
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+    RETURNING bom_id, bom_number
+    `,
+    [
+        companyId,
+        bomNumber,
+        data.bomName,
+        data.assemblyProductId,
+        data.assemblySubProductId,
+        data.memo,
+        data.unitOfMeasure,
+        userId,
+    ]
+);
+
+const bomId = headerResult.rows[0].bom_id;
+const generatedBomNumber = headerResult.rows[0].bom_number;
 
         for (const revision of data.revisions) {
             await insertRevision(client, bomId, revision);
@@ -324,16 +310,17 @@ export async function POST(request) {
         await client.query("COMMIT");
 
         return NextResponse.json(
-            {
-                success: true,
-                message: "Bill of Materials created successfully.",
-                bomId,
-            },
-            {
-                status: 201,
-                headers: NO_STORE_HEADERS,
-            }
-        );
+    {
+        success: true,
+        message: "Bill of Materials created successfully.",
+        bomId,
+        bomNumber: generatedBomNumber,
+    },
+    {
+        status: 201,
+        headers: NO_STORE_HEADERS,
+    }
+);
     } catch (error) {
         if (client) {
             try {

@@ -1,10 +1,63 @@
 
 import { NextResponse } from "next/server";
 import { getTenantContext, unauthorizedResponse } from "@/lib/tenant";
+import centralDb from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 const DEFAULT_RECEIVABLE_ACCOUNT_ID = 6;
+
+async function getNextSalesPaymentNumber(companyId, tenantClient) {
+  const numericCompanyId = Number(companyId);
+
+  if (
+    !Number.isSafeInteger(numericCompanyId) ||
+    numericCompanyId <= 0
+  ) {
+    throw new Error("Invalid company ID for payment numbering.");
+  }
+
+  const sequenceName =
+    `sales_payment_company_${numericCompanyId}_seq`;
+
+  // Store the sequence in the central erp_system database.
+  await centralDb.query(`
+    CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+    START WITH 1
+    INCREMENT BY 1
+  `);
+
+  // Skip numbers that already exist in this company's database.
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    const result = await centralDb.query(
+      `
+      SELECT nextval($1::regclass)::TEXT AS sequence_value
+      `,
+      [`public.${sequenceName}`]
+    );
+
+    const sequenceValue = result.rows[0].sequence_value;
+
+    const paymentNumber =
+      `PAY-${String(sequenceValue).padStart(6, "0")}`;
+
+    const existing = await tenantClient.query(
+      `
+      SELECT 1
+      FROM sales_payments
+      WHERE payment_number = $1
+      LIMIT 1
+      `,
+      [paymentNumber]
+    );
+
+    if (existing.rows.length === 0) {
+      return paymentNumber;
+    }
+  }
+
+  throw new Error("Could not generate a unique sales payment number.");
+}
 
 async function getCashBankAccounts(db) {
   const result = await db.query(`
@@ -425,21 +478,20 @@ export async function POST(request) {
   try {
     const tenant = await getTenantContext();
     if (!tenant) return unauthorizedResponse();
-    const { db } = tenant;
-    client = await db.connect();
+    const { db, companyId } = tenant;
+client = await db.connect();
 
     const body = await request.json();
 
     const {
-      paymentNumber,
-      invoiceId,
-      paymentDate,
-      amount,
-      paymentMethod,
-      accountId,
-      referenceNumber,
-      notes,
-    } = body;
+  invoiceId,
+  paymentDate,
+  amount,
+  paymentMethod,
+  accountId,
+  referenceNumber,
+  notes,
+} = body;
 
     if (!invoiceId) throw new Error("Invoice is required.");
     if (!accountId) throw new Error("Cash/Bank account is required.");
@@ -487,8 +539,10 @@ export async function POST(request) {
       );
     }
 
-    const finalPaymentNumber =
-      String(paymentNumber || "").trim() || `PAY-${Date.now()}`;
+    const finalPaymentNumber = await getNextSalesPaymentNumber(
+  companyId,
+  client
+);
 
     const duplicate = await client.query(
       `
@@ -681,8 +735,7 @@ export async function PUT(request) {
     const oldInvoice = lockedInvoices[oldInvoiceId];
     const newInvoice = lockedInvoices[newInvoiceId];
 
-    const finalPaymentNumber =
-      String(paymentNumber || "").trim() || oldPayment.payment_number;
+    const finalPaymentNumber = oldPayment.payment_number;
 
     const duplicate = await client.query(
       `

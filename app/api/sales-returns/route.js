@@ -1,6 +1,6 @@
 
 import { NextResponse } from "next/server";
-import { getOperationalPool } from "@/lib/db";
+import pool, { getOperationalPool } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
 
@@ -48,6 +48,62 @@ function errorResponse(message, status = 400, extra = {}) {
             status,
             headers: { "Cache-Control": "no-store" },
         }
+    );
+}
+
+async function getNextSalesReturnNumber(companyId, tenantClient) {
+    const numericCompanyId = Number(companyId);
+
+    if (
+        !Number.isSafeInteger(numericCompanyId) ||
+        numericCompanyId <= 0
+    ) {
+        throw new Error(
+            "Invalid company ID for Sales Return numbering."
+        );
+    }
+
+    const sequenceName =
+        `sales_return_company_${numericCompanyId}_seq`;
+
+    // Create the company's sequence in the central ERP database.
+    await pool.query(`
+        CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+        START WITH 1
+        INCREMENT BY 1
+    `);
+
+    for (let attempt = 0; attempt < 1000; attempt++) {
+        const result = await pool.query(
+            `
+            SELECT nextval($1::regclass)::TEXT AS sequence_value
+            `,
+            [`public.${sequenceName}`]
+        );
+
+        const sequenceValue = result.rows[0].sequence_value;
+
+        const returnNumber =
+            `SR-${String(sequenceValue).padStart(6, "0")}`;
+
+        // Check archived and active records to avoid reusing old numbers.
+        const existing = await tenantClient.query(
+            `
+            SELECT 1
+            FROM sales_returns
+            WHERE return_number = $1
+            LIMIT 1
+            `,
+            [returnNumber]
+        );
+
+        if (existing.rowCount === 0) {
+            return returnNumber;
+        }
+    }
+
+    throw new Error(
+        "Could not generate a unique Sales Return number."
     );
 }
 
@@ -627,30 +683,21 @@ const refundAmount =
         }
 
         /* -------------------------------------------------
-           5. GENERATE RETURN NUMBER
-        ------------------------------------------------- */
+   5. GENERATE RETURN NUMBER
+------------------------------------------------- */
 
-        const sequenceResult = await client.query(
-            `
-            SELECT nextval(
-                'public.sales_returns_return_id_seq'::regclass
-            ) AS next_id
-            `
-        );
+const returnNumber = await getNextSalesReturnNumber(
+    auth.companyId,
+    client
+);
 
-        const nextId = sequenceResult.rows[0].next_id;
-
-        const returnNumber =
-            `SR-${String(nextId).padStart(6, "0")}`;
-
-        /* -------------------------------------------------
+                /* -------------------------------------------------
            6. INSERT SALES RETURN HEADER
         ------------------------------------------------- */
 
         const headerResult = await client.query(
             `
             INSERT INTO sales_returns (
-                return_id,
                 return_number,
                 company_id,
                 invoice_id,
@@ -668,14 +715,13 @@ const refundAmount =
                 created_by
             )
             VALUES (
-                $1, $2, $3, $4, $5, $6,
-                $7, 'DRAFT', $8, $9, $10,
-                $11, $12, $13, $14, $15
+                $1, $2, $3, $4, $5,
+                $6, 'DRAFT', $7, $8, $9,
+                $10, $11, $12, $13, $14
             )
             RETURNING *
             `,
             [
-                nextId,
                 returnNumber,
                 auth.companyId,
                 invoiceId || null,

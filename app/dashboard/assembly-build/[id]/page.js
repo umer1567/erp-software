@@ -1892,8 +1892,8 @@ export default function AssemblyBuildDetailPage() {
                                                     <td className="px-3 py-3">
                                                         <input
                                                             type="number"
-                                                            min="0.0001"
-                                                            step="0.0001"
+                                                            min="1"
+                                                            step="1"
                                                             value={component.issuedQuantity}
                                                             disabled={readOnly}
                                                             onChange={(event) =>
@@ -1911,7 +1911,7 @@ export default function AssemblyBuildDetailPage() {
                                                         <input
                                                             type="number"
                                                             min="0"
-                                                            step="0.0001"
+                                                            step="1"
                                                             value={component.unitCost}
                                                             disabled={readOnly}
                                                             onChange={(event) =>
@@ -2070,8 +2070,8 @@ export default function AssemblyBuildDetailPage() {
                                                 <Input
                                                     label="Quantity"
                                                     type="number"
-                                                    min="0.0001"
-                                                    step="0.0001"
+                                                    min="1"
+                                                    step="1"
                                                     value={row.quantity}
                                                     onChange={(value) =>
                                                         updateByproduct(index, "quantity", value)
@@ -2083,7 +2083,7 @@ export default function AssemblyBuildDetailPage() {
                                                     label="Unit Cost"
                                                     type="number"
                                                     min="0"
-                                                    step="0.0001"
+                                                    step="1"
                                                     value={row.unitCost}
                                                     onChange={(value) =>
                                                         updateByproduct(index, "unitCost", value)

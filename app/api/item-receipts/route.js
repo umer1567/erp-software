@@ -1066,26 +1066,62 @@ export async function POST(request) {
         /* Generate receipt number                                           */
         /* ---------------------------------------------------------------- */
 
-        const year = String(receiptDate).slice(0, 4);
+        /* ---------------------------------------------------------------- */
+/* Generate receipt number                                           */
+/* ---------------------------------------------------------------- */
 
-        const numberResult = await client.query(
-            `
-            SELECT COUNT(*)::INTEGER AS total
-            FROM item_receipts
-            WHERE company_id = $1
-              AND receipt_number LIKE $2
-            `,
-            [
-                companyId,
-                `IR-${year}-%`,
-            ]
-        );
+const year = String(receiptDate).slice(0, 4);
 
-        const nextNumber =
-            Number(numberResult.rows[0].total || 0) + 1;
+const sequenceName =
+    `item_receipt_company_${companyId}_${year}_seq`;
 
-        const receiptNumber =
-            `IR-${year}-${String(nextNumber).padStart(6, "0")}`;
+// Create the sequence in the central ERP database.
+await pool.query(`
+    CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+    START WITH 1
+    INCREMENT BY 1
+`);
+
+let receiptNumber = null;
+
+// Check existing and archived receipts to prevent number reuse.
+for (let attempt = 0; attempt < 1000; attempt++) {
+    const sequenceResult = await pool.query(
+        `
+        SELECT nextval($1::regclass)::TEXT AS sequence_value
+        `,
+        [`public.${sequenceName}`]
+    );
+
+    const sequenceValue =
+        sequenceResult.rows[0].sequence_value;
+
+    const candidateNumber =
+        `IR-${year}-${String(sequenceValue).padStart(6, "0")}`;
+
+    const existingResult = await client.query(
+        `
+        SELECT 1
+        FROM item_receipts
+        WHERE
+            company_id = $1
+            AND receipt_number = $2
+        LIMIT 1
+        `,
+        [companyId, candidateNumber]
+    );
+
+    if (existingResult.rowCount === 0) {
+        receiptNumber = candidateNumber;
+        break;
+    }
+}
+
+if (!receiptNumber) {
+    throw new Error(
+        "Could not generate a unique Item Receipt number."
+    );
+}
 
         /* ---------------------------------------------------------------- */
         /* Insert Item Receipt header                                        */

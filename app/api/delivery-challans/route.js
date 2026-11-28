@@ -29,6 +29,62 @@ function errorResponse(error, fallback = "Unable to process Delivery Challans.")
     );
 }
 
+async function getNextDeliveryChallanNumber(companyId, tenantClient) {
+    const numericCompanyId = Number(companyId);
+
+    if (
+        !Number.isSafeInteger(numericCompanyId) ||
+        numericCompanyId <= 0
+    ) {
+        throw new Error(
+            "Invalid company ID for Delivery Challan numbering."
+        );
+    }
+
+    const sequenceName =
+        `delivery_challan_company_${numericCompanyId}_seq`;
+
+    // pool is the central ERP database connection.
+    await pool.query(`
+        CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+        START WITH 1
+        INCREMENT BY 1
+    `);
+
+    for (let attempt = 0; attempt < 1000; attempt++) {
+        const result = await pool.query(
+            `
+            SELECT nextval($1::regclass)::TEXT AS sequence_value
+            `,
+            [`public.${sequenceName}`]
+        );
+
+        const sequenceValue = result.rows[0].sequence_value;
+
+        const transactionNumber =
+            `DC-${String(sequenceValue).padStart(6, "0")}`;
+
+        // Include archived records to avoid reusing historical numbers.
+        const existing = await tenantClient.query(
+            `
+            SELECT 1
+            FROM delivery_challans
+            WHERE transaction_number = $1
+            LIMIT 1
+            `,
+            [transactionNumber]
+        );
+
+        if (existing.rowCount === 0) {
+            return transactionNumber;
+        }
+    }
+
+    throw new Error(
+        "Could not generate a unique Delivery Challan number."
+    );
+}
+
 async function getContext() {
     const user = await getCurrentUser();
 
@@ -639,7 +695,7 @@ export async function POST(request) {
                     orderedQuantity - previouslyDelivered
                 );
 
-                if (item.quantity > pendingQuantity + 0.000001) {
+                if (item.quantity > pendingQuantity + 1) {
                     await client.query("ROLLBACK");
 
                     return NextResponse.json(
@@ -695,82 +751,76 @@ export async function POST(request) {
             );
         }
 
-        const sequenceResult = await client.query(
-            `
-            SELECT nextval(
-                pg_get_serial_sequence('delivery_challans', 'delivery_challan_id')
-            ) AS delivery_challan_id
-            `
-        );
-
-        const challanId = Number(sequenceResult.rows[0].delivery_challan_id);
-        const transactionNumber = `DC-${String(challanId).padStart(6, "0")}`;
+        const transactionNumber = await getNextDeliveryChallanNumber(
+    context.companyId,
+    client
+);
 
         const insertResult = await client.query(
-            `
-            INSERT INTO delivery_challans (
-                delivery_challan_id,
-                company_id,
-                transaction_number,
-                transaction_date,
-                customer_id,
-                warehouse_id,
-                source_order_id,
-                status,
-                document_status,
-                subsidiary_name,
-                department,
-                challan_class,
-                driver_name,
-                driver_mobile_no,
-                vehicle_no,
-                project,
-                reference_no,
-                memo,
-                currency,
-                exchange_rate,
-                total_amount,
-                tax_amount,
-                gross_amount,
-                created_by,
-                updated_by
-            )
-            VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8,
-                'Pending Invoice',
-                $9, $10, $11, $12, $13, $14, $15,
-                $16, $17, $18, $19, $20, $21, $22, $23, $23
-            )
-            RETURNING *
-            `,
-            [
-                challanId,
-                context.companyId,
-                transactionNumber,
-                transactionDate,
-                customerId,
-                warehouseId,
-                sourceOrderId,
-                status,
-                body.subsidiary_name ||
-                    companyResult.rows[0]?.company_name ||
-                    null,
-                body.department || null,
-                body.challan_class || "Outbound Shipment",
-                body.driver_name || null,
-                body.driver_mobile_no || null,
-                body.vehicle_no || null,
-                body.project || null,
-                body.reference_no || null,
-                body.memo || null,
-                currency,
-                exchangeRate,
-                calculated.totalAmount,
-                calculated.taxAmount,
-                calculated.grossAmount,
-                context.userId,
-            ]
-        );
+    `
+    INSERT INTO delivery_challans (
+        company_id,
+        transaction_number,
+        transaction_date,
+        customer_id,
+        warehouse_id,
+        source_order_id,
+        status,
+        document_status,
+        subsidiary_name,
+        department,
+        challan_class,
+        driver_name,
+        driver_mobile_no,
+        vehicle_no,
+        project,
+        reference_no,
+        memo,
+        currency,
+        exchange_rate,
+        total_amount,
+        tax_amount,
+        gross_amount,
+        created_by,
+        updated_by
+    )
+    VALUES (
+        $1, $2, $3, $4, $5, $6, $7,
+        'Pending Invoice',
+        $8, $9, $10, $11, $12, $13, $14,
+        $15, $16, $17, $18, $19, $20, $21, $22, $22
+    )
+    RETURNING *
+    `,
+    [
+        context.companyId,
+        transactionNumber,
+        transactionDate,
+        customerId,
+        warehouseId,
+        sourceOrderId,
+        status,
+        body.subsidiary_name ||
+            companyResult.rows[0]?.company_name ||
+            null,
+        body.department || null,
+        body.challan_class || "Outbound Shipment",
+        body.driver_name || null,
+        body.driver_mobile_no || null,
+        body.vehicle_no || null,
+        body.project || null,
+        body.reference_no || null,
+        body.memo || null,
+        currency,
+        exchangeRate,
+        calculated.totalAmount,
+        calculated.taxAmount,
+        calculated.grossAmount,
+        context.userId,
+    ]
+);
+
+const challanId = insertResult.rows[0].delivery_challan_id;
 
         for (const item of calculated.items) {
             await client.query(

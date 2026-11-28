@@ -1,6 +1,6 @@
 
 import { NextResponse } from "next/server";
-import { getTenantDb } from "@/lib/db";
+import pool, { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
 
@@ -190,6 +190,79 @@ async function getItemBalance(client, {
     );
 
     return Number(result.rows[0]?.quantity || 0);
+}
+
+/* =========================================================
+   CENTRAL COMPANY-SPECIFIC ASSEMBLY BUILD NUMBERING
+========================================================= */
+
+async function getNextAssemblyBuildNumber(companyId, tenantClient) {
+    const safeCompanyId = positiveId(companyId, "Company");
+
+    const sequenceName =
+        `assembly_build_company_${safeCompanyId}_seq`;
+
+    const sequenceReference = `public.${sequenceName}`;
+
+    // Create the company-specific sequence in the central database.
+    await pool.query(`
+        CREATE SEQUENCE IF NOT EXISTS
+        public."${sequenceName}"
+        START WITH 1
+        INCREMENT BY 1
+        MINVALUE 1
+        NO CYCLE
+    `);
+
+    // Read the highest existing number, including archived records.
+    const existingResult = await tenantClient.query(
+        `
+        SELECT COALESCE(
+            MAX(SUBSTRING(transaction_number FROM 4)::BIGINT),
+            0
+        ) AS last_number
+        FROM assembly_builds
+        WHERE company_id = $1
+          AND transaction_number ~ '^AB-[0-9]+$'
+        `,
+        [safeCompanyId]
+    );
+
+    const existingNumber = Number(
+        existingResult.rows[0]?.last_number || 0
+    );
+
+    // Read the central sequence position.
+    const sequenceResult = await pool.query(
+        `
+        SELECT last_value, is_called
+        FROM public."${sequenceName}"
+        `
+    );
+
+    const sequenceState = sequenceResult.rows[0];
+
+    const sequenceNumber = sequenceState.is_called
+        ? Number(sequenceState.last_value)
+        : 0;
+
+    // Never reuse an existing transaction number.
+    const nextNumber =
+        Math.max(existingNumber, sequenceNumber) + 1;
+
+    // Advance the central sequence.
+    await pool.query(
+        `
+        SELECT setval(
+            $1::regclass,
+            $2,
+            TRUE
+        )
+        `,
+        [sequenceReference, nextNumber]
+    );
+
+    return `AB-${String(nextNumber).padStart(6, "0")}`;
 }
 
 /* =========================================================
@@ -811,26 +884,10 @@ export async function POST(request) {
             remarks: optionalText(row.remarks),
         }));
 
-        /* Generate company-specific transaction number */
+        /* Generate central company-specific transaction number */
 
-        const numberResult = await client.query(
-            `
-            SELECT COALESCE(
-                MAX(SUBSTRING(transaction_number FROM 4)::BIGINT),
-                0
-            ) AS last_number
-            FROM assembly_builds
-            WHERE company_id = $1
-              AND transaction_number ~ '^AB-[0-9]+$'
-            `,
-            [companyId]
-        );
-
-        const nextNumber =
-            Number(numberResult.rows[0]?.last_number || 0) + 1;
-
-        const transactionNumber =
-            `AB-${String(nextNumber).padStart(6, "0")}`;
+const transactionNumber =
+    await getNextAssemblyBuildNumber(companyId, client);
 
         const finishedUnitCost = componentAmount / buildQuantity;
 

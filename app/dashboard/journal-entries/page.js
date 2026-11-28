@@ -348,92 +348,92 @@ export default function JournalEntriesPage() {
   // -----------------------------------------------------
 
   useEffect(() => {
-  let active = true;
+    let active = true;
 
-  const loadPermissions = async () => {
-    try {
-      const response = await fetch("/api/permissions/current", {
-        method: "GET",
-        credentials: "same-origin",
-        cache: "no-store",
-        headers: {
-          Accept: "application/json",
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error("Unable to load journal permissions.");
-      }
-
-      const data = await response.json();
-
-      if (!Array.isArray(data.permissions)) {
-        throw new Error("Invalid permissions response.");
-      }
-
-      const permission = data.permissions.find(
-        (item) =>
-          String(item.permission_key || "")
-            .trim()
-            .toLowerCase() === "journal_entries"
-      );
-
-      const toBoolean = (value) =>
-        value === true ||
-        value === 1 ||
-        value === "1" ||
-        String(value).toLowerCase() === "true";
-
-      if (active) {
-        setJournalPermissions({
-          can_view: toBoolean(permission?.can_view),
-          can_create: toBoolean(permission?.can_create),
-          can_update: toBoolean(permission?.can_update),
-          can_delete: toBoolean(permission?.can_delete),
+    const loadPermissions = async () => {
+      try {
+        const response = await fetch("/api/permissions/current", {
+          method: "GET",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: {
+            Accept: "application/json",
+          },
         });
-      }
-    } catch (error) {
-      console.error("Journal permissions error:", error);
 
-      if (active) {
-        setJournalPermissions({
-          can_view: false,
-          can_create: false,
-          can_update: false,
-          can_delete: false,
-        });
-      }
-    } finally {
-      if (active) {
-        setPermissionLoading(false);
-      }
-    }
-  };
+        if (!response.ok) {
+          throw new Error("Unable to load journal permissions.");
+        }
 
-  loadPermissions();
+        const data = await response.json();
 
-  const handlePermissionsUpdated = () => {
+        if (!Array.isArray(data.permissions)) {
+          throw new Error("Invalid permissions response.");
+        }
+
+        const permission = data.permissions.find(
+          (item) =>
+            String(item.permission_key || "")
+              .trim()
+              .toLowerCase() === "journal_entries"
+        );
+
+        const toBoolean = (value) =>
+          value === true ||
+          value === 1 ||
+          value === "1" ||
+          String(value).toLowerCase() === "true";
+
+        if (active) {
+          setJournalPermissions({
+            can_view: toBoolean(permission?.can_view),
+            can_create: toBoolean(permission?.can_create),
+            can_update: toBoolean(permission?.can_update),
+            can_delete: toBoolean(permission?.can_delete),
+          });
+        }
+      } catch (error) {
+        console.error("Journal permissions error:", error);
+
+        if (active) {
+          setJournalPermissions({
+            can_view: false,
+            can_create: false,
+            can_update: false,
+            can_delete: false,
+          });
+        }
+      } finally {
+        if (active) {
+          setPermissionLoading(false);
+        }
+      }
+    };
+
     loadPermissions();
-  };
 
-  window.addEventListener(
-    "erp-permissions-updated",
-    handlePermissionsUpdated
-  );
+    const handlePermissionsUpdated = () => {
+      loadPermissions();
+    };
 
-  window.addEventListener("focus", handlePermissionsUpdated);
-
-  return () => {
-    active = false;
-
-    window.removeEventListener(
+    window.addEventListener(
       "erp-permissions-updated",
       handlePermissionsUpdated
     );
 
-    window.removeEventListener("focus", handlePermissionsUpdated);
-  };
-}, []);
+    window.addEventListener("focus", handlePermissionsUpdated);
+
+    return () => {
+      active = false;
+
+      window.removeEventListener(
+        "erp-permissions-updated",
+        handlePermissionsUpdated
+      );
+
+      window.removeEventListener("focus", handlePermissionsUpdated);
+    };
+  }, []);
 
   const canView = journalPermissions.can_view;
   const canCreate = journalPermissions.can_create;
@@ -1406,16 +1406,18 @@ export default function JournalEntriesPage() {
                     </label>
 
                     <input
-                      value={form.journalNumber}
-                      onChange={(event) =>
-                        updateForm("journalNumber", event.target.value)
+                      type="text"
+                      value={
+                        editingJournalId
+                          ? form.journalNumber
+                          : "Auto-generated on posting"
                       }
-                      placeholder="Auto-generated or JV-001"
-                      className={inputClass}
+                      readOnly
+                      className={`${inputClass} cursor-not-allowed bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400`}
                     />
 
                     <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
-                      Leave blank if your API generates the number.
+                      Automatically assigned by the system when the journal is posted.
                     </p>
                   </div>
 
@@ -1670,16 +1672,16 @@ export default function JournalEntriesPage() {
               {/* BALANCE SUMMARY */}
               <section
                 className={`rounded-2xl border p-5 transition ${balanced
-                    ? "border-emerald-200 bg-gradient-to-r from-emerald-50 to-green-50 dark:border-emerald-900/60 dark:from-emerald-950/30 dark:to-green-950/20"
-                    : "border-amber-200 bg-gradient-to-r from-amber-50 to-orange-50 dark:border-amber-900/60 dark:from-amber-950/30 dark:to-orange-950/20"
+                  ? "border-emerald-200 bg-gradient-to-r from-emerald-50 to-green-50 dark:border-emerald-900/60 dark:from-emerald-950/30 dark:to-green-950/20"
+                  : "border-amber-200 bg-gradient-to-r from-amber-50 to-orange-50 dark:border-amber-900/60 dark:from-amber-950/30 dark:to-orange-950/20"
                   }`}
               >
                 <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
                   <div className="flex items-start gap-3">
                     <div
                       className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${balanced
-                          ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300"
-                          : "bg-amber-100 text-amber-700 dark:bg-amber-900/60 dark:text-amber-300"
+                        ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300"
+                        : "bg-amber-100 text-amber-700 dark:bg-amber-900/60 dark:text-amber-300"
                         }`}
                     >
                       {balanced ? (
@@ -1692,8 +1694,8 @@ export default function JournalEntriesPage() {
                     <div>
                       <h3
                         className={`text-base font-extrabold ${balanced
-                            ? "text-emerald-900 dark:text-emerald-200"
-                            : "text-amber-900 dark:text-amber-200"
+                          ? "text-emerald-900 dark:text-emerald-200"
+                          : "text-amber-900 dark:text-amber-200"
                           }`}
                       >
                         {balanced
@@ -1734,8 +1736,8 @@ export default function JournalEntriesPage() {
                       </p>
                       <p
                         className={`mt-1 text-lg font-extrabold tabular-nums ${balanced
-                            ? "text-emerald-700 dark:text-emerald-300"
-                            : "text-amber-700 dark:text-amber-300"
+                          ? "text-emerald-700 dark:text-emerald-300"
+                          : "text-amber-700 dark:text-amber-300"
                           }`}
                       >
                         {money(difference)}
@@ -1779,11 +1781,11 @@ export default function JournalEntriesPage() {
                   <button
                     type="submit"
                     disabled={
-  saving ||
-  !balanced ||
-  selectableAccounts.length === 0 ||
-  (editingJournalId ? !canUpdate : !canCreate)
-}
+                      saving ||
+                      !balanced ||
+                      selectableAccounts.length === 0 ||
+                      (editingJournalId ? !canUpdate : !canCreate)
+                    }
                     className={greenButtonClass}
                   >
                     {saving ? (
@@ -1943,18 +1945,18 @@ export default function JournalEntriesPage() {
                             Clear Filters
                           </button>
                         ) : (
-  canCreate && (
-    <button
-      type="button"
-      onClick={addJournal}
-      className={`${primaryButtonClass} mt-5`}
-    >
-      <Plus size={17} />
-      Create First Journal
-    </button>
-  )
-)}
-                    
+                          canCreate && (
+                            <button
+                              type="button"
+                              onClick={addJournal}
+                              className={`${primaryButtonClass} mt-5`}
+                            >
+                              <Plus size={17} />
+                              Create First Journal
+                            </button>
+                          )
+                        )}
+
                       </td>
                     </tr>
                   ) : (
@@ -2034,16 +2036,16 @@ export default function JournalEntriesPage() {
                             </button>
 
                             {canUpdate && (
-  <button
-    type="button"
-    onClick={() => editJournal(journal.journal_id)}
-    title="Edit journal"
-    aria-label="Edit journal"
-    className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-blue-200 bg-blue-50 text-blue-700 transition hover:bg-blue-100 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-900/50"
-  >
-    <Pencil size={15} />
-  </button>
-)}
+                              <button
+                                type="button"
+                                onClick={() => editJournal(journal.journal_id)}
+                                title="Edit journal"
+                                aria-label="Edit journal"
+                                className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-blue-200 bg-blue-50 text-blue-700 transition hover:bg-blue-100 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-900/50"
+                              >
+                                <Pencil size={15} />
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getTenantContext, unauthorizedResponse } from "@/lib/tenant";
 import { parseIntegerQuantity } from "@/lib/quantity";
+import centralDb from "@/lib/db";
 
 import {
   required,
@@ -82,6 +83,85 @@ export async function GET() {
   }
 }
 
+async function getNextTransactionNumber({
+  companyId,
+  tenantClient,
+  type,
+}) {
+  const configs = {
+    invoice: {
+      sequencePrefix: "sales_invoice",
+      prefix: "INV-",
+      table: "sales_invoices",
+      column: "invoice_number",
+    },
+    posPayment: {
+      sequencePrefix: "pos_payment",
+      prefix: "POS-PAY-",
+      table: "sales_payments",
+      column: "payment_number",
+    },
+  };
+
+  const config = configs[type];
+
+  if (!config) {
+    throw new Error("Invalid transaction numbering type.");
+  }
+
+  const numericCompanyId = Number(companyId);
+
+  if (
+    !Number.isSafeInteger(numericCompanyId) ||
+    numericCompanyId <= 0
+  ) {
+    throw new Error("Invalid company ID for transaction numbering.");
+  }
+
+  const sequenceName =
+    `${config.sequencePrefix}_company_${numericCompanyId}_seq`;
+
+  // Sequences are stored in the central erp_system database.
+  await centralDb.query(`
+    CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+    START WITH 1
+    INCREMENT BY 1
+  `);
+
+  // Skip numbers that may already exist in this company's database.
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    const sequenceResult = await centralDb.query(
+      `
+      SELECT nextval($1::regclass)::TEXT AS sequence_value
+      `,
+      [`public.${sequenceName}`]
+    );
+
+    const sequenceValue = sequenceResult.rows[0].sequence_value;
+
+    const transactionNumber =
+      `${config.prefix}${String(sequenceValue).padStart(6, "0")}`;
+
+    const existingRecord = await tenantClient.query(
+      `
+      SELECT 1
+      FROM ${config.table}
+      WHERE ${config.column} = $1
+      LIMIT 1
+      `,
+      [transactionNumber]
+    );
+
+    if (existingRecord.rows.length === 0) {
+      return transactionNumber;
+    }
+  }
+
+  throw new Error(
+    "Could not generate a unique transaction number."
+  );
+}
+
 // =========================================================
 // POST: Create a Sales Invoice.
 //
@@ -107,7 +187,7 @@ export async function POST(request) {
   try {
     const tenant = await getTenantContext();
     if (!tenant) return unauthorizedResponse();
-    const { db } = tenant;
+    const { db, companyId } = tenant;
     client = await db.connect();
 
     const body = await request.json();
@@ -607,8 +687,12 @@ export async function POST(request) {
     }
 
     if (!finalInvoiceNumber) {
-      finalInvoiceNumber = `INV-${Date.now()}`;
-    }
+  finalInvoiceNumber = await getNextTransactionNumber({
+    companyId,
+    tenantClient: client,
+    type: "invoice",
+  });
+}
 
     const existingInvoice = await client.query(
       `
@@ -1165,8 +1249,11 @@ export async function POST(request) {
       const paymentAccount =
         paymentAccountResult.rows[0];
 
-      const paymentNumber =
-        `POS-PAY-${invoice.invoice_id}`;
+      const paymentNumber = await getNextTransactionNumber({
+  companyId,
+  tenantClient: client,
+  type: "posPayment",
+});
 
       const paymentResult = await client.query(
         `

@@ -773,7 +773,7 @@ export default function NewAssemblyUnbuildPage() {
                             </label>
                             <input
                                 type="number"
-                                min="0.000001"
+                                min="1"
                                 step="any"
                                 value={form.unbuildQuantity}
                                 onChange={(event) =>

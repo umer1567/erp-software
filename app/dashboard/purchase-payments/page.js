@@ -1323,19 +1323,17 @@ export default function PurchasePaymentsPage() {
                                     </div>
 
                                     <div className="grid grid-cols-1 gap-x-5 gap-y-5 md:grid-cols-2 xl:grid-cols-3">
-                                        <Field label="Payment Number">
-                                            <input
-                                                value={form.paymentNumber}
-                                                onChange={(event) =>
-                                                    updateForm(
-                                                        "paymentNumber",
-                                                        event.target.value
-                                                    )
-                                                }
-                                                placeholder="e.g. PPAY-001"
-                                                className={inputClass}
-                                            />
-                                        </Field>
+                                        <Field
+    label="Payment Number"
+    hint="Automatically generated when the payment is saved."
+>
+    <input
+        value={form.paymentNumber || ""}
+        readOnly
+        placeholder="Generated automatically"
+        className={`${inputClass} cursor-not-allowed bg-slate-100 dark:bg-slate-800`}
+    />
+</Field>
 
                                         <Field label="Payment Date">
                                             <div className="relative">

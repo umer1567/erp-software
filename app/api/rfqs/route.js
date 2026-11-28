@@ -63,6 +63,57 @@ function validationError(message) {
     return error;
 }
 
+async function getNextRFQNumber(companyId, tenantClient) {
+    const numericCompanyId = Number(companyId);
+
+    if (
+        !Number.isSafeInteger(numericCompanyId) ||
+        numericCompanyId <= 0
+    ) {
+        throw new Error("Invalid company ID for RFQ numbering.");
+    }
+
+    const sequenceName = `rfq_company_${numericCompanyId}_seq`;
+
+    // Central erp_system database owns company-specific RFQ sequences.
+    await pool.query(`
+        CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+        START WITH 1
+        INCREMENT BY 1
+    `);
+
+    for (let attempt = 0; attempt < 1000; attempt++) {
+        const result = await pool.query(
+            `
+            SELECT nextval($1::regclass)::TEXT AS sequence_value
+            `,
+            [`public.${sequenceName}`]
+        );
+
+        const sequenceValue = result.rows[0].sequence_value;
+
+        const transactionNumber =
+            `RFQ-${String(sequenceValue).padStart(6, "0")}`;
+
+        // Include historical and archived RFQs to prevent number reuse.
+        const existing = await tenantClient.query(
+            `
+            SELECT 1
+            FROM rfqs
+            WHERE transaction_number = $1
+            LIMIT 1
+            `,
+            [transactionNumber]
+        );
+
+        if (existing.rowCount === 0) {
+            return transactionNumber;
+        }
+    }
+
+    throw new Error("Could not generate a unique RFQ number.");
+}
+
 function normalizeSelectedItems(body) {
     if (Array.isArray(body.selectedItems)) {
         return body.selectedItems.map((item) => {
@@ -987,33 +1038,14 @@ export async function POST(request) {
         /* Generate RFQ transaction number                                    */
         /* ------------------------------------------------------------------ */
 
-        const numberResult = await client.query(
-            `
-            SELECT
-                COALESCE(
-                    MAX(
-                        NULLIF(
-                            REGEXP_REPLACE(
-                                transaction_number,
-                                '[^0-9]',
-                                '',
-                                'g'
-                            ),
-                            ''
-                        )::BIGINT
-                    ),
-                    0
-                ) + 1 AS next_number
-            FROM rfqs
-            WHERE company_id = $1
-            `,
-            [companyId]
+                /* ------------------------------------------------------------------ */
+        /* Generate RFQ transaction number                                    */
+        /* ------------------------------------------------------------------ */
+
+        const transactionNumber = await getNextRFQNumber(
+            companyId,
+            client
         );
-
-        const nextNumber = Number(numberResult.rows[0].next_number);
-
-        const transactionNumber =
-            `RFQ-${String(nextNumber).padStart(6, "0")}`;
 
         /* ------------------------------------------------------------------ */
         /* Insert RFQ header                                                  */

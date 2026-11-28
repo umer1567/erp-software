@@ -682,16 +682,16 @@ export default function SalesPaymentsPage() {
         method,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...(editingPaymentId ? { paymentId: editingPaymentId } : {}),
-          paymentNumber,
-          invoiceId: Number(invoiceId),
-          paymentDate,
-          amount: Number(amount),
-          paymentMethod,
-          accountId: Number(accountId),
-          referenceNumber,
-          notes,
-        }),
+  ...(editingPaymentId ? { paymentId: editingPaymentId } : {}),
+  ...(editingPaymentId ? { paymentNumber } : {}),
+  invoiceId: Number(invoiceId),
+  paymentDate,
+  amount: Number(amount),
+  paymentMethod,
+  accountId: Number(accountId),
+  referenceNumber,
+  notes,
+}),
       });
 
       const data = await response.json();
@@ -1161,17 +1161,23 @@ export default function SalesPaymentsPage() {
 
               <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
                 <div>
-                  <label className={labelClass}>Payment Number</label>
-                  <input
-                    value={paymentNumber}
-                    onChange={(e) => setPaymentNumber(e.target.value)}
-                    placeholder="e.g. PAY-001"
-                    className={inputClass}
-                  />
-                  <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
-                    Leave blank if your API generates this number.
-                  </p>
-                </div>
+  <label className={labelClass}>Payment Number</label>
+  <input
+    type="text"
+    value={
+      editingPaymentId
+        ? paymentNumber
+        : "Auto-generated on save"
+    }
+    readOnly
+    className={`${inputClass} cursor-not-allowed bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300`}
+  />
+  <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
+    {editingPaymentId
+      ? "Payment number cannot be changed."
+      : "A unique payment number will be assigned automatically when saved."}
+  </p>
+</div>
 
                 <div>
                   <label className={labelClass}>

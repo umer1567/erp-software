@@ -1065,8 +1065,8 @@ useEffect(() => {
       const method = isEditing ? "PUT" : "POST";
 
       const payload = {
-        invoiceNumber: invoiceNumber.trim(),
-        customerId: Number(customerId),
+  invoiceNumber: editingInvoiceId ? invoiceNumber.trim() : "",
+  customerId: Number(customerId),
         warehouseId: Number(warehouseId),
         invoiceDate,
         deliveryChallanId: deliveryChallanId ? Number(deliveryChallanId) : null,
@@ -1751,14 +1751,25 @@ useEffect(() => {
                 )}
 
                 <div>
-                  <label className={labelClass}>Invoice Number</label>
-                  <input
-                    value={invoiceNumber}
-                    onChange={(event) => setInvoiceNumber(event.target.value)}
-                    placeholder="INV-001"
-                    className={inputClass}
-                  />
-                </div>
+  <label className={labelClass}>Invoice Number</label>
+
+  <input
+    type="text"
+    value={
+      editingInvoiceId
+        ? invoiceNumber
+        : "Auto-generated on save"
+    }
+    readOnly
+    className={`${inputClass} cursor-not-allowed bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300`}
+  />
+
+  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+    {editingInvoiceId
+      ? "Invoice number cannot be changed."
+      : "A unique invoice number will be assigned automatically when saved."}
+  </p>
+</div>
 
                 <div>
                   <label className={labelClass}>Customer *</label>

@@ -1,6 +1,6 @@
 
 import { NextResponse } from "next/server";
-import { getTenantDb } from "@/lib/db";
+import pool, { getTenantDb } from "@/lib/db";
 import { attachUserNames } from "@/lib/tenant";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
@@ -23,6 +23,65 @@ function permissionError(error) {
     }
 
     return null;
+}
+
+async function getNextPurchaseRequisitionNumber(
+    companyId,
+    tenantClient
+) {
+    const numericCompanyId = Number(companyId);
+
+    if (
+        !Number.isSafeInteger(numericCompanyId) ||
+        numericCompanyId <= 0
+    ) {
+        throw new Error(
+            "Invalid company ID for Purchase Requisition numbering."
+        );
+    }
+
+    const sequenceName =
+        `purchase_requisition_company_${numericCompanyId}_seq`;
+
+    // Create the company-specific sequence in central erp_system.
+    await pool.query(`
+        CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+        START WITH 1
+        INCREMENT BY 1
+    `);
+
+    for (let attempt = 0; attempt < 1000; attempt++) {
+        const result = await pool.query(
+            `
+            SELECT nextval($1::regclass)::TEXT AS sequence_value
+            `,
+            [`public.${sequenceName}`]
+        );
+
+        const sequenceValue = result.rows[0].sequence_value;
+
+        const transactionNumber =
+            `RQ${String(sequenceValue).padStart(6, "0")}`;
+
+        // Check all existing requisitions, including archived records.
+        const existing = await tenantClient.query(
+            `
+            SELECT 1
+            FROM purchase_requisitions
+            WHERE transaction_number = $1
+            LIMIT 1
+            `,
+            [transactionNumber]
+        );
+
+        if (existing.rowCount === 0) {
+            return transactionNumber;
+        }
+    }
+
+    throw new Error(
+        "Could not generate a unique Purchase Requisition number."
+    );
 }
 
 export async function GET(request) {
@@ -402,19 +461,11 @@ export async function POST(request) {
             throw new Error("Selected location is unavailable.");
         }
 
-        const numberResult = await client.query(
-            `
-            SELECT
-                'RQ' || LPAD(
-                    nextval('purchase_requisition_number_seq')::TEXT,
-                    6,
-                    '0'
-                ) AS transaction_number
-            `
-        );
-
-        const transactionNumber =
-            numberResult.rows[0].transaction_number;
+                const transactionNumber =
+            await getNextPurchaseRequisitionNumber(
+                user.companyId,
+                client
+            );
 
         const header = await client.query(
             `

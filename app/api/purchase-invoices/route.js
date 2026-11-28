@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { randomUUID } from "crypto";
-import { getTenantDb } from "@/lib/db";
+import pool, { getTenantDb } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { requirePermission } from "@/lib/permissions";
 
@@ -26,13 +25,81 @@ function positiveNumber(value, defaultValue = 0) {
         : null;
 }
 
-function invoiceNumber() {
-    const date = new Date()
-        .toISOString()
-        .slice(0, 10)
-        .replaceAll("-", "");
+// ============================================================
+// PURCHASE INVOICE NUMBER GENERATION
+// Central sequence: independent per company and year
+// ============================================================
 
-    return `PI-${date}-${randomUUID().slice(0, 8).toUpperCase()}`;
+async function getNextPurchaseInvoiceNumber(
+    companyId,
+    purchaseDate,
+    tenantClient
+) {
+    const numericCompanyId = Number(companyId);
+
+    if (
+        !Number.isSafeInteger(numericCompanyId) ||
+        numericCompanyId <= 0
+    ) {
+        throw new Error(
+            "Invalid company ID for Purchase Invoice numbering."
+        );
+    }
+
+    const year = purchaseDate
+        ? String(purchaseDate).slice(0, 4)
+        : String(new Date().getFullYear());
+
+    if (!/^\d{4}$/.test(year)) {
+        throw new Error(
+            "Invalid year for Purchase Invoice numbering."
+        );
+    }
+
+    const sequenceName =
+        `purchase_invoice_company_${numericCompanyId}_${year}_seq`;
+
+    // Create the sequence in the central ERP database.
+    await pool.query(`
+        CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+        START WITH 1
+        INCREMENT BY 1
+    `);
+
+    // Check existing invoices, including archived records.
+    for (let attempt = 0; attempt < 1000; attempt++) {
+        const sequenceResult = await pool.query(
+            `
+            SELECT nextval($1::regclass)::TEXT AS sequence_value
+            `,
+            [`public.${sequenceName}`]
+        );
+
+        const sequenceValue =
+            sequenceResult.rows[0].sequence_value;
+
+        const candidateNumber =
+            `PI-${year}-${String(sequenceValue).padStart(6, "0")}`;
+
+        const existingResult = await tenantClient.query(
+            `
+            SELECT 1
+            FROM purchases
+            WHERE company_id = $1
+              AND purchase_number = $2
+            LIMIT 1
+            `,
+            [numericCompanyId, candidateNumber]
+        );
+
+        if (existingResult.rowCount === 0) {
+            return candidateNumber;
+        }
+    }
+
+    throw new Error(
+        "Could not generate a unique Purchase Invoice number."
+    );
 }
 
 function errorResponse(error) {
@@ -657,7 +724,11 @@ export async function POST(request) {
             throw new Error("Invoice total cannot be negative.");
         }
 
-        const number = invoiceNumber();
+        const number = await getNextPurchaseInvoiceNumber(
+    user.companyId,
+    purchaseDate,
+    client
+);
 
         const purchaseResult = await client.query(
             `

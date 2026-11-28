@@ -29,6 +29,60 @@ function errorResponse(error, fallback = "Unable to process the request.") {
     );
 }
 
+async function getNextSalesOrderNumber(companyId, tenantClient) {
+    const numericCompanyId = Number(companyId);
+
+    if (
+        !Number.isSafeInteger(numericCompanyId) ||
+        numericCompanyId <= 0
+    ) {
+        throw new Error("Invalid company ID for Sales Order numbering.");
+    }
+
+    const sequenceName =
+        `sales_order_company_${numericCompanyId}_seq`;
+
+    // pool is the central ERP database connection.
+    await pool.query(`
+        CREATE SEQUENCE IF NOT EXISTS public."${sequenceName}"
+        START WITH 1
+        INCREMENT BY 1
+    `);
+
+    for (let attempt = 0; attempt < 1000; attempt++) {
+        const result = await pool.query(
+            `
+            SELECT nextval($1::regclass)::TEXT AS sequence_value
+            `,
+            [`public.${sequenceName}`]
+        );
+
+        const sequenceValue = result.rows[0].sequence_value;
+
+        const orderNumber =
+            `SO-${String(sequenceValue).padStart(6, "0")}`;
+
+        // Check all existing records, including archived ones.
+        const existing = await tenantClient.query(
+            `
+            SELECT 1
+            FROM sales_orders
+            WHERE order_number = $1
+            LIMIT 1
+            `,
+            [orderNumber]
+        );
+
+        if (existing.rowCount === 0) {
+            return orderNumber;
+        }
+    }
+
+    throw new Error(
+        "Could not generate a unique Sales Order number."
+    );
+}
+
 async function getOrderContext() {
     const user = await getCurrentUser();
 
@@ -558,78 +612,72 @@ export async function POST(request) {
             }
         }
 
-        const sequenceResult = await client.query(
-            `
-            SELECT nextval(
-                pg_get_serial_sequence('sales_orders', 'order_id')
-            ) AS order_id
-            `
-        );
-
-        const orderId = Number(sequenceResult.rows[0].order_id);
-        const orderNumber = `SO-${String(orderId).padStart(6, "0")}`;
+        const orderNumber = await getNextSalesOrderNumber(
+    context.companyId,
+    client
+);
 
         const insertResult = await client.query(
-            `
-            INSERT INTO sales_orders (
-                order_id,
-                company_id,
-                order_number,
-                source_quotation_id,
-                customer_id,
-                warehouse_id,
-                transaction_date,
-                status,
-                document_status,
-                department,
-                project,
-                order_class,
-                sales_rep,
-                payment_term,
-                memo,
-                terms_conditions,
-                currency,
-                exchange_rate,
-                subtotal,
-                tax_amount,
-                gross_amount,
-                customer_credit_limit,
-                created_by,
-                updated_by
-            )
-            VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8,
-                'Pending Delivery Challan',
-                $9, $10, $11, $12, $13, $14, $15,
-                $16, $17, $18, $19, $20, $21, $22, $22
-            )
-            RETURNING *
-            `,
-            [
-                orderId,
-                context.companyId,
-                orderNumber,
-                sourceQuotationId,
-                customerId,
-                warehouseId,
-                transactionDate,
-                status,
-                body.department || null,
-                body.project || null,
-                body.order_class || null,
-                body.sales_rep || null,
-                body.payment_term || null,
-                body.memo || null,
-                body.terms_conditions || null,
-                currency,
-                exchangeRate,
-                itemsResult.subtotal,
-                itemsResult.taxAmount,
-                itemsResult.grossAmount,
-                Number(customer.rows[0].credit_limit || 0),
-                context.userId,
-            ]
-        );
+    `
+    INSERT INTO sales_orders (
+        company_id,
+        order_number,
+        source_quotation_id,
+        customer_id,
+        warehouse_id,
+        transaction_date,
+        status,
+        document_status,
+        department,
+        project,
+        order_class,
+        sales_rep,
+        payment_term,
+        memo,
+        terms_conditions,
+        currency,
+        exchange_rate,
+        subtotal,
+        tax_amount,
+        gross_amount,
+        customer_credit_limit,
+        created_by,
+        updated_by
+    )
+    VALUES (
+        $1, $2, $3, $4, $5, $6, $7,
+        'Pending Delivery Challan',
+        $8, $9, $10, $11, $12, $13, $14,
+        $15, $16, $17, $18, $19, $20, $21, $21
+    )
+    RETURNING *
+    `,
+    [
+        context.companyId,
+        orderNumber,
+        sourceQuotationId,
+        customerId,
+        warehouseId,
+        transactionDate,
+        status,
+        body.department || null,
+        body.project || null,
+        body.order_class || null,
+        body.sales_rep || null,
+        body.payment_term || null,
+        body.memo || null,
+        body.terms_conditions || null,
+        currency,
+        exchangeRate,
+        itemsResult.subtotal,
+        itemsResult.taxAmount,
+        itemsResult.grossAmount,
+        Number(customer.rows[0].credit_limit || 0),
+        context.userId,
+    ]
+);
+
+const orderId = insertResult.rows[0].order_id;
 
         for (const item of itemsResult.items) {
             await client.query(
