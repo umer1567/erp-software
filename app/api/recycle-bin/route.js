@@ -166,6 +166,30 @@ async function authorizeRecycleBin() {
     }
 }
 
+
+/**
+ * Only a genuine central system ADMIN gets cross-company visibility.
+ * A company-level ADMIN must remain restricted to their own company.
+ */
+async function isGlobalSystemAdmin(roleId) {
+    const result = await pool.query(
+        `
+        SELECT role_id
+        FROM public.roles
+        WHERE role_id = $1
+          AND company_id IS NULL
+          AND is_system_role = TRUE
+          AND UPPER(role_name) = 'ADMIN'
+        LIMIT 1
+        `,
+        [roleId]
+    );
+
+    return result.rows.length > 0;
+}
+
+
+
 /* -------------------------------------------------------------------------- */
 /* Query helpers                                                              */
 /* -------------------------------------------------------------------------- */
@@ -307,9 +331,12 @@ async function getTenantArchiveRecords(
 /* Central company membership archive records                                 */
 /* -------------------------------------------------------------------------- */
 
+
+
 async function getCentralMembershipRecords(
     companyId,
-    moduleKey
+    moduleKey,
+    globalAdmin = false
 ) {
     if (
         moduleKey &&
@@ -317,6 +344,23 @@ async function getCentralMembershipRecords(
     ) {
         return [];
     }
+
+    const values = [];
+    const conditions = [];
+
+    if (!globalAdmin) {
+        values.push(companyId);
+        conditions.push(`r.company_id = $${values.length}`);
+    }
+
+    if (moduleKey) {
+        values.push(moduleKey);
+        conditions.push(`r.module_key = $${values.length}`);
+    }
+
+    const whereClause = conditions.length
+        ? `WHERE ${conditions.join(" AND ")}`
+        : "";
 
     const result = await pool.query(
         `
@@ -328,16 +372,17 @@ async function getCentralMembershipRecords(
             r.source_table,
             r.record_label,
             r.deleted_by,
-            u.full_name AS deleted_by_name,
+            COALESCE(u.full_name, u.username, 'Unknown')
+                AS deleted_by_name,
             r.deleted_at,
             r.deletion_reason
         FROM public.user_company_recycle_bin_items r
         LEFT JOIN public.users u
             ON u.user_id = r.deleted_by
-        WHERE r.company_id = $1
+        ${whereClause}
         ORDER BY r.deleted_at DESC, r.recycle_bin_id DESC
         `,
-        [companyId]
+        values
     );
 
     return result.rows.map((record) => {
@@ -357,16 +402,19 @@ async function getCentralMembershipRecords(
             company_id: Number(record.company_id),
             module_key: record.module_key,
             source_table: record.source_table,
-            source_record_id: `${record.user_id}:${record.company_id}`,
+            source_record_id:
+                `${record.user_id}:${record.company_id}`,
             record_label: record.record_label,
             deleted_by: record.deleted_by,
-            deleted_by_name: record.deleted_by_name || null,
+            deleted_by_name: record.deleted_by_name,
             deleted_at: record.deleted_at,
             deletion_reason: record.deletion_reason,
             archive_source: "central",
         };
     });
 }
+
+
 /* -------------------------------------------------------------------------- */
 /* Central role archive records                                               */
 /* -------------------------------------------------------------------------- */
@@ -435,6 +483,12 @@ export async function GET(request) {
 
         const companyId = Number(tenant.companyId);
 
+        const roleId = Number(
+    tenant.user?.roleId ?? tenant.user?.role_id
+);
+
+const globalAdmin = await isGlobalSystemAdmin(roleId);
+
         if (!Number.isSafeInteger(companyId) || companyId <= 0) {
             return errorResponse(
                 "Invalid company context.",
@@ -492,9 +546,10 @@ export async function GET(request) {
                 moduleKey
             ),
             getCentralMembershipRecords(
-                companyId,
-                moduleKey
-            ),
+    companyId,
+    moduleKey,
+    globalAdmin
+),
             getCentralRoleRecords(
                 companyId,
                 moduleKey

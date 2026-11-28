@@ -71,6 +71,11 @@ const SUPPORTED_MODULES = {
     table: "sales_returns",
     label: "Sales Returns",
   },
+
+  user_company_memberships: {
+  table: "user_companies",
+  label: "User Company Membership",
+},
 };
 
 const MODULE_LABELS = {

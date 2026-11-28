@@ -221,10 +221,24 @@ async function authorizePermanentDelete() {
             };
         }
 
-        return {
-            tenant,
-            response: null,
-        };
+        const globalAdminResult = await pool.query(
+    `
+    SELECT 1
+    FROM public.roles
+    WHERE role_id = $1
+      AND company_id IS NULL
+      AND is_system_role = TRUE
+      AND deleted_at IS NULL
+    LIMIT 1
+    `,
+    [Number(roleId)]
+);
+
+return {
+    tenant,
+    isGlobalSystemAdmin: globalAdminResult.rowCount === 1,
+    response: null,
+};
     } catch (error) {
         console.error("RECYCLE BIN PERMISSION ERROR:", error);
 
@@ -289,16 +303,24 @@ function decodeCentralArchiveId(recycleBinId) {
 
 async function permanentlyDeleteCentralMembership(
     archiveId,
-    companyId
+    companyId,
+    isGlobalSystemAdmin = false
 ) {
     let client;
     let transactionStarted = false;
 
     try {
-        client = await tenant.db.connect();
+        // Membership archives are stored in the central database.
+        client = await pool.connect();
 
         await client.query("BEGIN");
         transactionStarted = true;
+
+        // Global system ADMIN can access archives across companies.
+        // Other administrators can only access their own company.
+        const companyScope = isGlobalSystemAdmin
+            ? null
+            : companyId;
 
         const archiveResult = await client.query(
             `
@@ -311,12 +333,15 @@ async function permanentlyDeleteCentralMembership(
                 record_label
             FROM public.user_company_recycle_bin_items
             WHERE recycle_bin_id = $1
-              AND company_id = $2
+              AND (
+                    $2::BIGINT IS NULL
+                    OR company_id = $2
+              )
               AND module_key = 'user_company_memberships'
               AND source_table = 'user_companies'
             FOR UPDATE
             `,
-            [archiveId, companyId]
+            [archiveId, companyScope]
         );
 
         if (archiveResult.rowCount !== 1) {
@@ -324,12 +349,22 @@ async function permanentlyDeleteCentralMembership(
             transactionStarted = false;
 
             return errorResponse(
-                "Archived company membership not found.",
+                "Archived company membership not found or you are not authorized to delete it.",
                 404
             );
         }
 
         const archived = archiveResult.rows[0];
+        const archivedCompanyId = Number(archived.company_id);
+
+        if (
+            !Number.isSafeInteger(archivedCompanyId) ||
+            archivedCompanyId <= 0
+        ) {
+            throw new Error(
+                "The archived membership has an invalid company reference."
+            );
+        }
 
         const membershipResult = await client.query(
             `
@@ -342,7 +377,7 @@ async function permanentlyDeleteCentralMembership(
               AND company_id = $2
             FOR UPDATE
             `,
-            [archived.user_id, archived.company_id]
+            [archived.user_id, archivedCompanyId]
         );
 
         if (membershipResult.rowCount !== 1) {
@@ -369,7 +404,7 @@ async function permanentlyDeleteCentralMembership(
             client,
             {
                 archiveId,
-                companyId,
+                companyId: archivedCompanyId,
             }
         );
 
@@ -382,7 +417,7 @@ async function permanentlyDeleteCentralMembership(
             recycleBinId: -archiveId,
             module: "user_company_memberships",
             recordId: Number(archived.user_id),
-            companyId: Number(archived.company_id),
+            companyId: archivedCompanyId,
             recordLabel: archived.record_label,
             ...result,
         });
@@ -427,7 +462,6 @@ async function permanentlyDeleteCentralMembership(
         client?.release();
     }
 }
-
 /* -------------------------------------------------------------------------- */
 /* Central role permanent deletion                                            */
 /* -------------------------------------------------------------------------- */
@@ -648,8 +682,8 @@ async function permanentlyDeleteTenantRecord(
     let transactionStarted = false;
 
     try {
-        // Use central erp_system for both archive and operational records.
-        const client = await tenant.db.connect();
+        // Tenant operational records and their archive are in the tenant database.
+client = await tenant.db.connect();
 
         await client.query("BEGIN");
         transactionStarted = true;
@@ -725,39 +759,48 @@ async function permanentlyDeleteTenantRecord(
 
         let deleteResult;
         
-        // Products: permanently remove related stock adjustment
-        // item history, then permanently delete the archived product.
-        if (archived.module_key === "products") {
-            if (originalResult.rows[0].is_active === true) {
-                await client.query("ROLLBACK");
-                transactionStarted = false;
+        // Products: never delete stock adjustment history to force deletion.
+if (archived.module_key === "products") {
+    if (originalResult.rows[0].is_active === true) {
+        await client.query("ROLLBACK");
+        transactionStarted = false;
 
-                return errorResponse(
-                    "This product is active. Archive it before permanent deletion.",
-                    409
-                );
-            }
+        return errorResponse(
+            "This product is active. Archive it before permanent deletion.",
+            409
+        );
+    }
 
-            // Delete stock adjustment history referencing this product.
-            await client.query(
-                `
-                DELETE FROM public.stock_adjustment_items
-                WHERE product_id = $1
-                `,
-                [recordId]
-            );
+    const stockHistoryResult = await client.query(
+        `
+        SELECT 1
+        FROM public.stock_adjustment_items
+        WHERE product_id = $1
+        LIMIT 1
+        `,
+        [recordId]
+    );
 
-            // Permanently delete the product.
-            deleteResult = await client.query(
-                `
-                DELETE FROM public.products
-                WHERE product_id = $1
-                  AND is_active = FALSE
-                RETURNING product_id
-                `,
-                [recordId]
-            );
-        } else {
+    if (stockHistoryResult.rowCount > 0) {
+        await client.query("ROLLBACK");
+        transactionStarted = false;
+
+        return errorResponse(
+            "This product has stock adjustment history and cannot be permanently deleted. The Recycle Bin entry and stock history have been preserved.",
+            409
+        );
+    }
+
+    deleteResult = await client.query(
+        `
+        DELETE FROM public.products
+        WHERE product_id = $1
+          AND is_active = FALSE
+        RETURNING product_id
+        `,
+        [recordId]
+    );
+} else {
             if (originalResult.rows[0].deleted_at == null) {
                 await client.query("ROLLBACK");
                 transactionStarted = false;
@@ -872,8 +915,11 @@ if (error.code === "23001") {
 /* -------------------------------------------------------------------------- */
 
 export async function DELETE(request, context) {
-    const { tenant, response } =
-        await authorizePermanentDelete();
+    const {
+    tenant,
+    response,
+    isGlobalSystemAdmin,
+} = await authorizePermanentDelete();
 
     if (response) return response;
 
@@ -907,9 +953,10 @@ export async function DELETE(request, context) {
         }
 
         return permanentlyDeleteCentralMembership(
-            centralArchive.archiveId,
-            companyId
-        );
+    centralArchive.archiveId,
+    companyId,
+    isGlobalSystemAdmin
+);
     }
 
     return permanentlyDeleteTenantRecord(

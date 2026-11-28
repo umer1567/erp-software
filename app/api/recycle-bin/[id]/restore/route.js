@@ -200,10 +200,24 @@ async function authorizeRestore() {
             };
         }
 
-        return {
-            tenant,
-            response: null,
-        };
+        const globalAdminResult = await pool.query(
+    `
+    SELECT 1
+    FROM public.roles
+    WHERE role_id = $1
+      AND company_id IS NULL
+      AND is_system_role = TRUE
+      AND deleted_at IS NULL
+    LIMIT 1
+    `,
+    [Number(roleId)]
+);
+
+return {
+    tenant,
+    isGlobalSystemAdmin: globalAdminResult.rowCount === 1,
+    response: null,
+};
     } catch (error) {
         console.error(
             "RECYCLE BIN RESTORE PERMISSION ERROR:",
@@ -269,7 +283,11 @@ function decodeCentralArchiveId(recycleBinId) {
 /* Central user-company membership restore                                   */
 /* -------------------------------------------------------------------------- */
 
-async function restoreCentralMembership(archiveId, companyId) {
+async function restoreCentralMembership(
+    archiveId,
+    companyId,
+    isGlobalSystemAdmin = false
+) {
     let client;
     let transactionStarted = false;
 
@@ -278,6 +296,12 @@ async function restoreCentralMembership(archiveId, companyId) {
 
         await client.query("BEGIN");
         transactionStarted = true;
+
+        // Global ADMIN can locate the archive across companies.
+        // Other administrators remain restricted to their own company.
+        const companyScope = isGlobalSystemAdmin
+            ? null
+            : companyId;
 
         const archiveResult = await client.query(
             `
@@ -290,12 +314,15 @@ async function restoreCentralMembership(archiveId, companyId) {
                 record_label
             FROM public.user_company_recycle_bin_items
             WHERE recycle_bin_id = $1
-              AND company_id = $2
+              AND (
+                    $2::BIGINT IS NULL
+                    OR company_id = $2
+              )
               AND module_key = 'user_company_memberships'
               AND source_table = 'user_companies'
             FOR UPDATE
             `,
-            [archiveId, companyId]
+            [archiveId, companyScope]
         );
 
         if (archiveResult.rowCount !== 1) {
@@ -303,18 +330,29 @@ async function restoreCentralMembership(archiveId, companyId) {
             transactionStarted = false;
 
             return errorResponse(
-                "Archived company membership not found.",
+                "Archived company membership not found or you are not authorized to restore it.",
                 404
             );
         }
 
         const archived = archiveResult.rows[0];
+        const archivedCompanyId = Number(archived.company_id);
 
+        if (
+            !Number.isSafeInteger(archivedCompanyId) ||
+            archivedCompanyId <= 0
+        ) {
+            throw new Error(
+                "The archived membership has an invalid company reference."
+            );
+        }
+
+        // Restore using the actual company ID from the locked archive row.
         const result = await restoreUserCompanyMembership(
             client,
             {
                 archiveId,
-                companyId,
+                companyId: archivedCompanyId,
             }
         );
 
@@ -327,7 +365,7 @@ async function restoreCentralMembership(archiveId, companyId) {
             recycleBinId: -archiveId,
             module: "user_company_memberships",
             recordId: Number(archived.user_id),
-            companyId: Number(archived.company_id),
+            companyId: archivedCompanyId,
             recordLabel: archived.record_label,
             ...result,
         });
@@ -379,7 +417,6 @@ async function restoreCentralMembership(archiveId, companyId) {
         client?.release();
     }
 }
-
 /* -------------------------------------------------------------------------- */
 /* Central role restore                                                       */
 /* -------------------------------------------------------------------------- */
@@ -759,7 +796,11 @@ WHERE product_id = $1
 /* -------------------------------------------------------------------------- */
 
 export async function POST(request, context) {
-    const { tenant, response } = await authorizeRestore();
+    const {
+    tenant,
+    response,
+    isGlobalSystemAdmin,
+} = await authorizeRestore();
 
     if (response) return response;
 
@@ -770,6 +811,16 @@ export async function POST(request, context) {
     }
 
     const companyId = Number(tenant.companyId);
+
+    console.log("========== RESTORE DIAGNOSTICS ==========");
+console.log("Requested Recycle Bin ID:", recycleBinId);
+console.log("Decoded archive:", recycleBinId < 0
+    ? decodeCentralArchiveId(recycleBinId)
+    : "Tenant archive");
+console.log("Current tenant company ID:", companyId);
+console.log("Current user ID:", tenant.user?.userId ?? tenant.user?.user_id);
+console.log("Current role ID:", tenant.user?.roleId ?? tenant.user?.role_id);
+console.log("=========================================");
 
     if (!Number.isSafeInteger(companyId) || companyId <= 0) {
         return errorResponse("Invalid company context.", 403);
@@ -793,9 +844,10 @@ export async function POST(request, context) {
         }
 
         return restoreCentralMembership(
-            centralArchive.archiveId,
-            companyId
-        );
+    centralArchive.archiveId,
+    companyId,
+    isGlobalSystemAdmin
+);
     }
 
     return restoreTenantRecord(
